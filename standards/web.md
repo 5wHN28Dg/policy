@@ -20,8 +20,8 @@ Also applies: [dependencies.md](dependencies.md) for every dependency, including
 *Check:* the file exists with a date and sources. For new projects, it is committed no later than the first framework or bundler dependency. CI resolves the browser list (for example `npx browserslist`) and fails if it differs from the list recorded in the matrix, which catches changes from a `caniuse-lite` update as well as edits to the query. A PR that adds use of a platform capability with no matrix row also updates the matrix.
 
 ### WEB-2
-**Tier T1. MUST.** Supported browsers are declared in `browserslist` (a `.browserslistrc` file or the `browserslist` key in `package.json`), and the build tooling reads it.
-*Check:* the declaration exists; the build config (transpiler, CSS tooling) does not override it with a different target list.
+**Tier T1. MUST.** Supported browsers are declared in `browserslist` (a `.browserslistrc` file or the `browserslist` key in `package.json`). If the project has build tooling (a transpiler, bundler or CSS tooling), it reads that declaration. A project with no build step still declares its browsers this way: the declaration is what `WEB-1`'s resolved list and the tests are measured against.
+*Check:* the declaration exists; where there is build config, it does not override it with a different target list.
 
 ### WEB-3
 **Tier T1. MUST.** A feature counts as platform-provided only if it is a standard Web Platform feature (HTML, CSS, or a Web API on a standards track) that is supported in every browser declared under `WEB-2`, or that has a fallback meeting `WEB-4`. Vendor-prefixed features, features behind flags, and origin trials are not platform-provided. Anything else is a dependency or custom code. ([rationale](../guides/web-rationale.md#what-counts-as-platform-provided))

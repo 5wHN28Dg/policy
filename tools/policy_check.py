@@ -331,7 +331,8 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
     has_config = (root / ".browserslistrc").is_file() or (
         pkg.is_file() and "browserslist" in json.loads(pkg.read_text(encoding="utf-8") or "{}"))
     if not has_config:
-        return [Problem("WEB-2", "no browserslist declaration (.browserslistrc or the `browserslist` key in package.json)")]
+        return [Problem("WEB-2", "no browserslist declaration (.browserslistrc or the `browserslist` key in package.json)",
+                        ".browserslistrc", artifact=True)]
     # In CI, the conformance action installs the policy's lockfile-pinned browserslist and sets BROWSERSLIST_BIN.
     # Locally, fall back to npx with the same version (not integrity-checked).
     binary = os.environ.get("BROWSERSLIST_BIN")
@@ -542,7 +543,12 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if not CSP_MARKER.search(text):
+        if rel == EXCEPTIONS_FILE or not CSP_MARKER.search(text):
+            continue
+        lines = text.splitlines()
+        # A file sets a CSP only if a directive appears near the header name; prose about a missing CSP doesn't count.
+        near = [i for i, l in enumerate(lines) if CSP_MARKER.search(l)]
+        if not any(DIRECTIVE_RE.search("\n".join(lines[max(0, i - 5):i + 6])) for i in near):
             continue
         found = True
         has_script_src = re.search(r"(?i)script-src|scriptSrc", text) is not None

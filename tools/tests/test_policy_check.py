@@ -1010,3 +1010,43 @@ class CommandWiringTests(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout)  # GHSA-3 is Critical: no exception covers it
             self.assertIn("excepted by EX-1", r.stdout)
             self.assertIn("1 blocking", r.stdout)
+
+
+class TrialTwoTests(unittest.TestCase):
+    """Fixes from the kks-explorer v2.1 notes (4.2, 4.4, 3.4)."""
+
+    def csp_rules(self, files):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in files.items():
+                write(Path(d), rel, text)
+            return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
+
+    def test_prose_about_a_missing_csp_is_not_a_csp(self):
+        # 4.4: the exception describing the missing CSP made the check pass
+        self.assertEqual(self.csp_rules({"policy-exceptions.json": '{"finding": "served with no Content-Security-Policy"}'}), ["WEB-8"])
+        self.assertEqual(self.csp_rules({"server/notes.py": "# TODO: send a Content-Security-Policy header\n"}), ["WEB-8"])
+
+    def test_a_marker_with_a_directive_nearby_counts(self):
+        self.assertEqual(self.csp_rules({"server/app.py": "HEADERS = {\n  'Content-Security-Policy':\n    \"default-src 'self'; \"\n    \"script-src 'self'\",\n}\n"}), [])
+        self.assertEqual(self.csp_rules({"tauri.conf.json": '{"app": {"security": {"csp": "default-src \'self\'"}}}'}), [])
+
+    def test_missing_browser_declaration_is_a_baseline_artifact(self):
+        # 4.2: WEB-2 failed during the baseline period although .browserslistrc is a declaration file
+        with tempfile.TemporaryDirectory() as d:
+            problems = pc.check_browserslist(Path(d), pc.Header(tier="T1", types=["web"]))
+        self.assertEqual([(p.rule, p.file, p.artifact) for p in problems], [("WEB-2", ".browserslistrc", True)])
+
+    def test_baseline_turns_missing_browserslist_into_a_warning(self):
+        saved = os.environ.pop("POLICY_SKIP_BROWSERSLIST", None)
+        until = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                compliant_project(root, tier="T1", types="web")
+                write(root, "README.md", f"Tier: T1\nPolicy: v2.2\nType: web\nBaseline: until {until}\n")
+                problems = pc.conformance(root, None, {})  # no .browserslistrc, so npx is never reached
+        finally:
+            if saved is not None:
+                os.environ["POLICY_SKIP_BROWSERSLIST"] = saved
+        web2 = [p for p in problems if p.rule == "WEB-2"]
+        self.assertEqual([p.level for p in web2], ["warning"])
