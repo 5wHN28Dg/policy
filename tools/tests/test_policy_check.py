@@ -107,7 +107,7 @@ class ConformanceTests(unittest.TestCase):
             compliant_project(root)
             for f in ("SECURITY.md", "docs/threat-model.md", "docs/capability-matrix.md", "license-allowlist.txt", "budgets.json"):
                 (root / f).unlink()
-            self.assertEqual(rules(pc.conformance(root, None, {})), ["Gov §1", "Gov §4", "Gov §5", "NAT-3", "NAT-7"])
+            self.assertEqual(rules(pc.conformance(root, None, {})), ["Gov §1", "Gov §4", "Gov §5 (license allowlist)", "NAT-3", "NAT-7"])
 
     def test_t1_does_not_need_t2_files(self):
         with tempfile.TemporaryDirectory() as d:
@@ -938,12 +938,13 @@ class ExceptionReviewTests(unittest.TestCase):
             self.assertIn("renewals count", ok[0].message)
             write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(expires=later, renewals=1)]}))
             self.assertEqual(pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-1"}}), [])
-            # same scope (or an overlapping one) under a new id
+            # the same rule under a new id, with the same files or a wider glob
             write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(id="EX-9")]}))
             msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-9"}}))
-            self.assertIn("re-adds the scope of EX-1", msgs)
-            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-9"}}))
-            self.assertIn("re-adds the scope of EX-1", msgs)
+            self.assertIn("replaces EX-1", msgs)
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(id="EX-8", files=["src/*.js"])]}))
+            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-8"}}))
+            self.assertIn("replaces EX-1", msgs)
 
     def test_allow_marker_never_rests_on_an_exception(self):
         with tempfile.TemporaryDirectory() as d:

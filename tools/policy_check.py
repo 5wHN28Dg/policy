@@ -150,7 +150,7 @@ def check_files(root: Path, h: Header) -> list[Problem]:
         elif not re.search(r"(?im)^\s*Checked:\s*\S", matrix.read_text(encoding="utf-8", errors="replace")):
             problems.append(Problem(rule, "the capability matrix has no `Checked:` date", "docs/capability-matrix.md"))
     if n >= 2 and not h.lighter_t2 and not (root / "license-allowlist.txt").is_file():
-        problems.append(Problem("Gov §5", "license-allowlist.txt is missing (the written license policy: one allowed SPDX id per line)",
+        problems.append(Problem("Gov §5 (license allowlist)", "license-allowlist.txt is missing (the written license policy: one allowed SPDX id per line)",
                                 "license-allowlist.txt", artifact=True))
     return problems
 
@@ -1046,11 +1046,10 @@ def check_exception_changes(root: Path, base: str | None, event: dict) -> list[P
                                                "a renewal is re-decided and counted, never silent", EXCEPTIONS_FILE))
         if not prev:
             for gone_id, g in before.items():
-                overlap = str(g.get("rule")) == str(e.get("rule")) and (
-                    not g.get("files") or not e.get("files") or set(g.get("files")) & set(e.get("files")))
-                if gone_id not in after and overlap:
-                    problems.append(Problem("Gov §10", f"{ex_id} re-adds the scope of {gone_id} under a new id; renew "
-                                                       f"{gone_id} instead, so its age and renewals stay visible",
+                # Same rule is enough: glob strings can't be compared for overlap (`src/a.js` vs `src/*.js`).
+                if gone_id not in after and str(g.get("rule")) == str(e.get("rule")):
+                    problems.append(Problem("Gov §10", f"{ex_id} replaces {gone_id} for the same rule under a new id; "
+                                                       f"renew {gone_id} instead, so its age and renewals stay visible",
                                             EXCEPTIONS_FILE))
     body = ((event.get("pull_request") or {}).get("body") or "")
     named = set(re.findall(r"(?im)^\s*Exception change:\s*(.+)$", body))
