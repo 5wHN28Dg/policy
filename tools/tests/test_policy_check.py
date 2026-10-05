@@ -35,6 +35,17 @@ def compliant_project(root: Path, tier: str = "T2", types: str = "native") -> No
         write(root, "index.html", "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'; object-src 'none'; base-uri 'none'\">\n")
 
 
+def commit_backdated(root: Path, days: int = 3, message: str = "x") -> None:
+    """Commit everything in root (making it a git repo if needed) with author and committer dates `days` ago."""
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    when = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", message, "--allow-empty"], check=True, env=env)
+
+
 def rules(problems):
     return sorted({p.rule for p in problems})
 
@@ -96,7 +107,7 @@ class ConformanceTests(unittest.TestCase):
             compliant_project(root)
             for f in ("SECURITY.md", "docs/threat-model.md", "docs/capability-matrix.md", "license-allowlist.txt", "budgets.json"):
                 (root / f).unlink()
-            self.assertEqual(rules(pc.conformance(root, None, {})), ["Gov §1", "Gov §4", "Gov §5", "NAT-3", "NAT-7"])
+            self.assertEqual(rules(pc.conformance(root, None, {})), ["Gov §1", "Gov §4", "Gov §5 (license allowlist)", "NAT-3", "NAT-7"])
 
     def test_t1_does_not_need_t2_files(self):
         with tempfile.TemporaryDirectory() as d:
@@ -645,7 +656,12 @@ class ReviewFixTests(unittest.TestCase):
                 f"const k = 'x'; // {pc.ALLOW_MARKER}",
             ]))
             write(Path(d), "docs/notes.md", "use // nosemgrep sparingly\n")
-            self.assertEqual([p.line for p in pc.check_markers(Path(d))], [1, 4])
+            # line 3 names an exception link, but no entry in force has it
+            self.assertEqual([p.line for p in pc.check_markers(Path(d))], [1, 3, 4])
+            ex = pc.Exception_("EX-9", "WEB-9", ["a.js"], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/9")
+            self.assertEqual([p.line for p in pc.check_markers(Path(d), [ex])], [1, 4])
+            elsewhere = pc.Exception_("EX-9", "WEB-9", ["src/*.js"], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/9")
+            self.assertEqual([p.line for p in pc.check_markers(Path(d), [elsewhere])], [1, 3, 4])
 
     def test_lockfile_in_ancestor_and_pyproject_without_deps(self):
         with tempfile.TemporaryDirectory() as d:
@@ -737,7 +753,10 @@ class ReReviewTests(unittest.TestCase):
                 'const help = "add a nosemgrep comment";',
             ]))
             write(Path(d), "notes.md", f"token = abc {pc.ALLOW_MARKER}\n")
-            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d))), [("a.js", 1), ("notes.md", 1)])
+            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d))), [("a.js", 1), ("a.js", 2), ("notes.md", 1)])
+            ex = pc.Exception_("EX-4", "WEB-9", [], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/4")
+            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d), [ex])),
+                             [("a.js", 1), ("notes.md", 1)])
 
     def test_unresolvable_base_fails(self):
         with tempfile.TemporaryDirectory() as d:
@@ -746,3 +765,248 @@ class ReReviewTests(unittest.TestCase):
             write(Path(d), "README.md", "Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until 2099-01-01\n")
             self.assertIn("not available", pc.check_gitleaks_config(Path(d), "origin/nope", {})[0].message)
             self.assertIn("not available", pc.check_baseline_change(Path(d), "origin/nope", pc.read_header(Path(d)))[0].message)
+
+
+class ExceptionTests(unittest.TestCase):
+    TODAY = datetime.date.today()
+
+    def entry(self, **kw):
+        d = lambda n: (self.TODAY + datetime.timedelta(days=n)).isoformat()
+        e = {"id": "EX-1", "rule": "WEB-8", "finding": "No CSP yet", "reason": "70 inline handlers to move first",
+             "compensatingControl": "WEB-9 sinks reviewed by hand", "acceptedBy": "@owner", "written": d(-3),
+             "accepted": d(-2), "expires": d(60), "renewals": 0, "link": "https://github.com/o/r/issues/1"}
+        e.update(kw)
+        return e
+
+    def load(self, entries, raw=None, commit=True):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "policy-exceptions.json", raw if raw is not None else json.dumps({"schemaVersion": 1, "exceptions": entries}))
+            if commit:
+                commit_backdated(Path(d))
+            return pc.load_exceptions(Path(d))
+
+    def test_valid_exception_turns_error_into_warning(self):
+        active, problems = self.load([self.entry()])
+        self.assertEqual((len(active), problems), (1, []))
+        p = [pc.Problem("WEB-8", "no CSP"), pc.Problem("WEB-9", "sink", "a.js", 3)]
+        pc.apply_exceptions(p, active)
+        self.assertEqual([x.level for x in p], ["warning", "error"])
+        self.assertIn("excepted by EX-1 until", p[0].message)
+
+    def test_files_scope(self):
+        active, _ = self.load([self.entry(id="EX-2", rule="WEB-9", files=["admin.html", "src/*.js"])])
+        p = [pc.Problem("WEB-9", "s", "admin.html", 1), pc.Problem("WEB-9", "s", "src/a.js", 2),
+             pc.Problem("WEB-9", "s", "index.html", 3), pc.Problem("WEB-9", "s")]
+        pc.apply_exceptions(p, active)
+        self.assertEqual([x.level for x in p], ["warning", "warning", "error", "error"])
+
+    def test_combined_rule_labels(self):
+        active, _ = self.load([self.entry(rule="NAT-7")])
+        p = [pc.Problem("WEB-15/NAT-7/OTH-5", "budgets.json is missing")]
+        self.assertEqual(pc.apply_exceptions(p, active)[0].level, "warning")
+
+    def test_invalid_entries(self):
+        cases = {
+            "lacks": self.entry(reason=""),
+            "more than 90 days": self.entry(expires=(self.TODAY + datetime.timedelta(days=120)).isoformat()),
+            "is not a rule ID": self.entry(rule="secrets"),
+            "without \"files\"": self.entry(rule="Gov §5"),
+            "whole number": self.entry(renewals="none"),
+            "not YYYY-MM-DD": self.entry(expires="soon"),
+        }
+        for text, e in cases.items():
+            active, problems = self.load([e])
+            self.assertEqual(active, [], text)
+            self.assertIn(text, problems[0].message, text)
+            self.assertFalse(problems[0].exceptable)
+
+    def test_expired_exception_stops_applying(self):
+        past = lambda n: (self.TODAY - datetime.timedelta(days=n)).isoformat()
+        active, problems = self.load([self.entry(written=past(80), accepted=past(70), expires=past(1))])
+        self.assertEqual(active, [])
+        self.assertIn("expired on", problems[0].message)
+
+    def test_bad_file(self):
+        self.assertIn("not valid JSON", self.load(None, raw="{")[1][0].message)
+        self.assertIn("schemaVersion", self.load(None, raw='{"exceptions": []}')[1][0].message)
+
+    def test_policy_controls_and_critical_are_not_exceptable(self):
+        active, _ = self.load([self.entry(id="EX-3", rule="Gov §5 (GHSA-1)", files=["package-lock.json"])])
+        crit = pc.Problem("Gov §5 (GHSA-1)", "critical vuln", "package-lock.json", exceptable=False)
+        high = pc.Problem("Gov §5 (GHSA-1)", "high vuln", "package-lock.json")
+        marker = pc.Problem("Gov §5", "bare nosemgrep", "a.js", 1, exceptable=False)
+        pc.apply_exceptions([crit, high, marker], active)
+        self.assertEqual([crit.level, high.level, marker.level], ["error", "warning", "error"])
+
+    def test_conformance_reads_the_file(self):
+        os.environ["POLICY_SKIP_BROWSERSLIST"] = "1"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            compliant_project(root, types="web")
+            (root / "index.html").unlink()  # no CSP: WEB-8
+            self.assertEqual([p.rule for p in pc.conformance(root, None, {}) if p.level == "error"], ["WEB-8"])
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry()]}))
+            commit_backdated(root)
+            self.assertEqual([p.rule for p in pc.conformance(root, None, {}) if p.level == "error"], [])
+
+    def test_vuln_gate_critical_is_not_exceptable(self):
+        report = {"results": [{"source": {"path": "/x/package-lock.json"}, "packages": [
+            {"package": {"name": "a", "version": "1"}, "groups": [{"ids": ["G-1"], "max_severity": "9.8"}]},
+            {"package": {"name": "b", "version": "1"}, "groups": [{"ids": ["G-2"], "max_severity": "7.5"}]}]}]}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "osv.json"
+            path.write_text(json.dumps(report))
+            blocking, _ = pc.vuln_gate(path, "T2")
+        self.assertEqual([b.exceptable for b in blocking], [False, True])
+
+    def test_the_template_example_is_valid(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(pc.POLICY_ROOT / "templates" / "policy-exceptions.example.json", Path(d) / "policy-exceptions.json")
+            commit_backdated(Path(d))
+            active, problems = pc.load_exceptions(Path(d), today=datetime.date(2026, 10, 10))
+            self.assertEqual(([e.id for e in active], problems), (["EX-1", "EX-2"], []))
+
+
+class ExceptionReviewTests(unittest.TestCase):
+    """The PR #3 review: scope, renewal, the 24-hour wait and line-level links."""
+    entry = ExceptionTests.entry
+    TODAY = ExceptionTests.TODAY
+
+    def test_globs_stay_in_their_segment_and_broad_ones_are_refused(self):
+        self.assertTrue(pc.glob_regex("src/*").match("src/a.js"))
+        self.assertFalse(pc.glob_regex("src/*").match("src/a/b.js"))
+        self.assertTrue(pc.glob_regex("src/**").match("src/a/b.js"))
+        self.assertTrue(pc.glob_regex("src/**/*.html").match("src/index.html"))
+        self.assertTrue(pc.glob_regex(".github/workflows/x.yml").match(".github/workflows/x.yml"))
+        for g in ("*", "**", "**/*", "*.*", "./*", "**/*.js", "*/*/*/*", "[a-z]*/x"):
+            self.assertTrue(pc.too_broad(g), g)
+        for g in ("admin.html", "src/*.js", "src/**/*.html", "android/app2/build.gradle.kts", "./docs/x.md", ".github/workflows/x.yml"):
+            self.assertFalse(pc.too_broad(g), g)
+
+    def test_governance_rules_match_exactly(self):
+        self.assertTrue(pc.rule_matches("Gov §5 (GHSA-1)", "Gov §5 (GHSA-1)"))
+        self.assertFalse(pc.rule_matches("Gov §5 (GHSA-1)", "Gov §5"))
+        self.assertFalse(pc.rule_matches("Gov §5 (eval)", "Gov §5"))
+        self.assertTrue(pc.rule_matches("WEB-15/NAT-7/OTH-5", "NAT-7"))
+
+    def test_broad_entry_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [
+                self.entry(rule="Gov §5 (GHSA-1)", files=["*"])]}))
+            commit_backdated(Path(d))
+            active, problems = pc.load_exceptions(Path(d))
+        self.assertEqual(active, [])
+        self.assertIn("would match any file", problems[0].message)
+
+    def test_same_day_acceptance_is_a_warning_not_a_refusal(self):
+        today = self.TODAY.isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [
+                self.entry(written=today, accepted=today)]}))
+            active, problems = pc.load_exceptions(Path(d))
+        self.assertEqual(len(active), 1)  # Section 11's wait is for solo developers; CI can't tell, so it only warns
+        self.assertEqual([(p.rule, p.level) for p in problems], [("Gov §11", "warning")])
+
+    def test_dot_paths_are_kept(self):
+        ex = pc.Exception_("EX-1", "DEP-7", [".github/workflows/arm64.yml"], self.TODAY, self.TODAY, "https://x")
+        p = [pc.Problem("DEP-7", "unpinned", ".github/workflows/arm64.yml", 109)]
+        self.assertEqual(pc.apply_exceptions(p, [ex])[0].level, "warning")
+
+    def test_budget_rules_per_section_and_loosening_not_exceptable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            data = json.loads(EXAMPLE_BUDGETS)
+            del data["native"]["linux"]["runs"]
+            write(root, "budgets.json", json.dumps(data))
+            problems = pc.check_budgets(root, pc.Header(tier="T2", types=["web", "native"]))
+            self.assertEqual({p.rule for p in problems}, {"NAT-7"})
+
+    def test_pr_changes_must_be_named_counted_and_not_re_added(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry()]}))
+            commit_backdated(root, days=10)
+            base = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            later = (self.TODAY + datetime.timedelta(days=80)).isoformat()
+            # renewal without counting it
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(expires=later)]}))
+            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {}))
+            self.assertIn("renewals count", msgs)
+            self.assertIn("Exception change: EX-1", msgs)
+            ok = pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-1 (re-decided)"}})
+            self.assertIn("renewals count", ok[0].message)
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(expires=later, renewals=1)]}))
+            self.assertEqual(pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-1"}}), [])
+            # the same rule under a new id, with the same files or a wider glob
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(id="EX-9")]}))
+            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-9"}}))
+            self.assertIn("replaces EX-1", msgs)
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(id="EX-8", files=["src/*.js"])]}))
+            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-8"}}))
+            self.assertIn("replaces EX-1", msgs)
+
+    def test_allow_marker_never_rests_on_an_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "k.py", f"KEY = 'AKIA...'  # {pc.ALLOW_MARKER} exception: https://github.com/o/r/issues/1\n")
+            ex = pc.Exception_("EX-1", "WEB-9", [], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/1")
+            problems = pc.check_markers(Path(d), [ex])
+            self.assertIn("rotated", problems[0].message)
+
+    def test_missing_files_can_be_excepted_by_path(self):
+        p = [pc.Problem("Gov §4", "docs/threat-model.md is missing", "docs/threat-model.md")]
+        ex = pc.Exception_("EX-1", "Gov §4", ["docs/threat-model.md"], self.TODAY, self.TODAY, "https://x")
+        self.assertEqual(pc.apply_exceptions(p, [ex])[0].level, "warning")
+
+    def test_malformed_file_does_not_crash(self):
+        for raw in ("[]", '{"schemaVersion": 1, "exceptions": [1, "x"]}'):
+            with tempfile.TemporaryDirectory() as d:
+                write(Path(d), "policy-exceptions.json", raw)
+                active, problems = pc.load_exceptions(Path(d))
+                self.assertEqual(active, [])
+                self.assertTrue(problems)
+
+
+class CommandWiringTests(unittest.TestCase):
+    """Each command that reads policy-exceptions.json applies it (a revert of the wiring fails these)."""
+
+    def project_with_exception(self, d, rule, files):
+        e = ExceptionTests.entry(ExceptionTests, rule=rule, files=files)
+        write(Path(d), "README.md", "Tier: T2\nPolicy: v2.1\nType: web\n")
+        write(Path(d), "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [e]}))
+        commit_backdated(Path(d))
+
+    def run_cmd(self, d, *args):
+        env = {**os.environ, "POLICY_SKIP_BROWSERSLIST": "1"}
+        env.pop("GITHUB_ACTIONS", None)
+        env.pop("GITHUB_STEP_SUMMARY", None)
+        return subprocess.run([sys.executable, str(pc.POLICY_ROOT / "tools" / "policy_check.py"), *args],
+                              cwd=d, capture_output=True, text=True, env=env)
+
+    def test_sast(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.project_with_exception(d, "WEB-9", ["app.js"])
+            Path(d, "r.json").write_text(json.dumps({"results": [{"check_id": "x.web-9", "path": "app.js", "start": {"line": 1},
+                "extra": {"message": "m", "severity": "ERROR", "metadata": {"policy-rule": "WEB-9"}}}]}))
+            r = self.run_cmd(d, "sast", "--report", "r.json")
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertIn("excepted by EX-1", r.stdout)
+
+    def test_licenses(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.project_with_exception(d, "Gov §5 (license left-pad)", ["package-lock.json"])
+            Path(d, "l.json").write_text(json.dumps({"results": [{"source": {"path": str(Path(d) / "package-lock.json")},
+                "packages": [{"package": {"name": "left-pad", "version": "1"}, "license_violations": ["WTFPL"]}]}]}))
+            r = self.run_cmd(d, "licenses", "--report", "l.json")
+            self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_vulns(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.project_with_exception(d, "Gov §5 (GHSA-2)", ["package-lock.json"])
+            Path(d, "v.json").write_text(json.dumps({"results": [{"source": {"path": str(Path(d) / "package-lock.json")},
+                "packages": [{"package": {"name": "a", "version": "1"}, "groups": [{"ids": ["GHSA-2"], "max_severity": "7.5"}]},
+                             {"package": {"name": "b", "version": "1"}, "groups": [{"ids": ["GHSA-3"], "max_severity": "9.8"}]}]}]}))
+            r = self.run_cmd(d, "vulns", "--root", ".", "--report", "v.json")
+            self.assertEqual(r.returncode, 1, r.stdout)  # GHSA-3 is Critical: no exception covers it
+            self.assertIn("excepted by EX-1", r.stdout)
+            self.assertIn("1 blocking", r.stdout)

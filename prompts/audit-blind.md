@@ -20,6 +20,9 @@ standard. You do not get the author's reasoning; that comes in pass 2.
 4. Walk each trust boundary and each applicable standard rule, by ID. Trace data from entry to storage to exit.
 5. Check the evidence each rule's Check names: files, CI jobs, records, tests. A rule without its evidence is a
    finding against that rule.
+6. List every entry in `policy-exceptions.json` (if present) under "Open exceptions", with its age and renewal count
+   (Section 10). Judge whether each compensating control still holds, and whether the entry covers more than its
+   finding. List every `policy-fp` marker and re-check a sample of them (Section 5).
 
 Confirm every finding in the code before you write it down. If you can't tell, mark it "unconfirmed" and say what
 would settle it.

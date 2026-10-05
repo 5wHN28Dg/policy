@@ -37,6 +37,11 @@ against what the author meant.
      `pinned-sources.cdx.json` (DEP-8);
    - on T3, a change that touches a trust boundary links the adversarial pass of the fresh-context review in its
      description (Section 11);
+   - a new or changed entry in `policy-exceptions.json` is a real Section 10 exception: the finding, the reason it
+     can't be met now, a compensating control that actually limits the risk, and an issue link. Flag an entry that
+     covers more files or rules than its finding needs, an entry for a finding this same diff introduces (fix it
+     instead), an `acceptedBy` who is the PR's author on a project that has another maintainer, and a changed expiry
+     whose re-decision isn't linked;
    - a new `nosemgrep` comment, gitleaks allow comment or `policy-fp` marker carries a reason and a link to the review that
      confirmed it, and that review is not this PR's author (Section 5).
 4. Whether the declared tier still fits Section 3, given what the change does.
