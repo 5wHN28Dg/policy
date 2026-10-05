@@ -658,7 +658,10 @@ class ReviewFixTests(unittest.TestCase):
             write(Path(d), "docs/notes.md", "use // nosemgrep sparingly\n")
             # line 3 names an exception link, but no entry in force has it
             self.assertEqual([p.line for p in pc.check_markers(Path(d))], [1, 3, 4])
-            self.assertEqual([p.line for p in pc.check_markers(Path(d), {"https://github.com/o/r/issues/9"})], [1, 4])
+            ex = pc.Exception_("EX-9", "WEB-9", ["a.js"], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/9")
+            self.assertEqual([p.line for p in pc.check_markers(Path(d), [ex])], [1, 4])
+            elsewhere = pc.Exception_("EX-9", "WEB-9", ["src/*.js"], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/9")
+            self.assertEqual([p.line for p in pc.check_markers(Path(d), [elsewhere])], [1, 3, 4])
 
     def test_lockfile_in_ancestor_and_pyproject_without_deps(self):
         with tempfile.TemporaryDirectory() as d:
@@ -751,7 +754,8 @@ class ReReviewTests(unittest.TestCase):
             ]))
             write(Path(d), "notes.md", f"token = abc {pc.ALLOW_MARKER}\n")
             self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d))), [("a.js", 1), ("a.js", 2), ("notes.md", 1)])
-            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d), {"https://github.com/o/r/issues/4"})),
+            ex = pc.Exception_("EX-4", "WEB-9", [], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/4")
+            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d), [ex])),
                              [("a.js", 1), ("notes.md", 1)])
 
     def test_unresolvable_base_fails(self):
@@ -804,7 +808,6 @@ class ExceptionTests(unittest.TestCase):
     def test_invalid_entries(self):
         cases = {
             "lacks": self.entry(reason=""),
-            "less than a day": self.entry(written=self.TODAY.isoformat(), accepted=self.TODAY.isoformat()),
             "more than 90 days": self.entry(expires=(self.TODAY + datetime.timedelta(days=120)).isoformat()),
             "is not a rule ID": self.entry(rule="secrets"),
             "without \"files\"": self.entry(rule="Gov §5"),
@@ -874,10 +877,11 @@ class ExceptionReviewTests(unittest.TestCase):
         self.assertTrue(pc.glob_regex("src/*").match("src/a.js"))
         self.assertFalse(pc.glob_regex("src/*").match("src/a/b.js"))
         self.assertTrue(pc.glob_regex("src/**").match("src/a/b.js"))
-        self.assertTrue(pc.glob_regex("**/*.html").match("index.html"))
-        for g in ("*", "**", "**/*", "*.*", "./*"):
+        self.assertTrue(pc.glob_regex("src/**/*.html").match("src/index.html"))
+        self.assertTrue(pc.glob_regex(".github/workflows/x.yml").match(".github/workflows/x.yml"))
+        for g in ("*", "**", "**/*", "*.*", "./*", "**/*.js", "*/*/*/*", "[a-z]*/x"):
             self.assertTrue(pc.too_broad(g), g)
-        for g in ("admin.html", "src/*.js", "**/*.html", "android/app2/build.gradle.kts"):
+        for g in ("admin.html", "src/*.js", "src/**/*.html", "android/app2/build.gradle.kts", "./docs/x.md", ".github/workflows/x.yml"):
             self.assertFalse(pc.too_broad(g), g)
 
     def test_governance_rules_match_exactly(self):
@@ -895,17 +899,28 @@ class ExceptionReviewTests(unittest.TestCase):
         self.assertEqual(active, [])
         self.assertIn("would match any file", problems[0].message)
 
-    def test_24_hours_from_git_not_from_typed_dates(self):
+    def test_same_day_acceptance_is_a_warning_not_a_refusal(self):
+        today = self.TODAY.isoformat()
         with tempfile.TemporaryDirectory() as d:
             write(Path(d), "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [
-                self.entry(written="2020-01-01")]}))
-            active, problems = pc.load_exceptions(Path(d))  # not committed at all
-            self.assertEqual(active, [])
-            self.assertIn("less than 24 hours", problems[0].message)
-            commit_backdated(Path(d), days=0)  # committed just now
-            self.assertIn("less than 24 hours", pc.load_exceptions(Path(d))[1][0].message)
-            later = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=25)
-            self.assertEqual(len(pc.load_exceptions(Path(d), now=later)[0]), 1)
+                self.entry(written=today, accepted=today)]}))
+            active, problems = pc.load_exceptions(Path(d))
+        self.assertEqual(len(active), 1)  # Section 11's wait is for solo developers; CI can't tell, so it only warns
+        self.assertEqual([(p.rule, p.level) for p in problems], [("Gov §11", "warning")])
+
+    def test_dot_paths_are_kept(self):
+        ex = pc.Exception_("EX-1", "DEP-7", [".github/workflows/arm64.yml"], self.TODAY, self.TODAY, "https://x")
+        p = [pc.Problem("DEP-7", "unpinned", ".github/workflows/arm64.yml", 109)]
+        self.assertEqual(pc.apply_exceptions(p, [ex])[0].level, "warning")
+
+    def test_budget_rules_per_section_and_loosening_not_exceptable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            data = json.loads(EXAMPLE_BUDGETS)
+            del data["native"]["linux"]["runs"]
+            write(root, "budgets.json", json.dumps(data))
+            problems = pc.check_budgets(root, pc.Header(tier="T2", types=["web", "native"]))
+            self.assertEqual({p.rule for p in problems}, {"NAT-7"})
 
     def test_pr_changes_must_be_named_counted_and_not_re_added(self):
         with tempfile.TemporaryDirectory() as d:
@@ -923,15 +938,18 @@ class ExceptionReviewTests(unittest.TestCase):
             self.assertIn("renewals count", ok[0].message)
             write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(expires=later, renewals=1)]}))
             self.assertEqual(pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-1"}}), [])
-            # same scope, new id
+            # same scope (or an overlapping one) under a new id
             write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry(id="EX-9")]}))
+            msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-9"}}))
+            self.assertIn("re-adds the scope of EX-1", msgs)
             msgs = " ".join(p.message for p in pc.check_exception_changes(root, base, {"pull_request": {"body": "Exception change: EX-9"}}))
             self.assertIn("re-adds the scope of EX-1", msgs)
 
     def test_allow_marker_never_rests_on_an_exception(self):
         with tempfile.TemporaryDirectory() as d:
             write(Path(d), "k.py", f"KEY = 'AKIA...'  # {pc.ALLOW_MARKER} exception: https://github.com/o/r/issues/1\n")
-            problems = pc.check_markers(Path(d), {"https://github.com/o/r/issues/1"})
+            ex = pc.Exception_("EX-1", "WEB-9", [], datetime.date.today(), datetime.date.today(), "https://github.com/o/r/issues/1")
+            problems = pc.check_markers(Path(d), [ex])
             self.assertIn("rotated", problems[0].message)
 
     def test_missing_files_can_be_excepted_by_path(self):

@@ -172,8 +172,10 @@ def check_budgets(root: Path, h: Header) -> list[Problem]:
         return [Problem(budget_rule(h), "cannot validate budgets.json: the jsonschema package is not installed", "budgets.json")]
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = jsonschema.Draft202012Validator(schema)
+    section_rule = {"web": "WEB-15", "native": "NAT-7", "custom": "OTH-5"}
     return [
-        Problem(budget_rule(h), f"budgets.json: {'/'.join(map(str, err.absolute_path)) or '(root)'}: {err.message}", "budgets.json")
+        Problem(section_rule.get(str(err.absolute_path[0]) if err.absolute_path else "", budget_rule(h)),
+                f"budgets.json: {'/'.join(map(str, err.absolute_path)) or '(root)'}: {err.message}", "budgets.json")
         for err in sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
     ]
 
@@ -243,7 +245,7 @@ def check_budget_loosening(root: Path, base: str | None, event: dict) -> list[Pr
     body = ((event.get("pull_request") or {}).get("body") or "")
     if loosened and not re.search(r"(?im)^\s*Budget change:\s*\S", body):
         return [Problem("Budgets", "this PR loosens " + "; ".join(loosened)
-                        + ". Add a `Budget change: <reason>` line to the PR description", "budgets.json")]
+                        + ". Add a `Budget change: <reason>` line to the PR description", "budgets.json", exceptable=False)]
     return []
 
 
@@ -594,11 +596,11 @@ POLICY_FP = re.compile(r"policy-fp:\s*\S.*\(\s*https?://\S+\s*\)", re.I)
 EXCEPTION_LINK = re.compile(r"\bexception:\s*(https?://[^\s)]+)", re.I)
 
 
-def check_markers(root: Path, exception_links: set[str] | None = None) -> list[Problem]:
+def check_markers(root: Path, exceptions: list | None = None) -> list[Problem]:
     """Section 5: every suppression marker carries either a `policy-fp: <reason> (<link>)` or `exception: <link>` to
     an exception in force in policy-exceptions.json. A gitleaks allow marker can't be an exception (Section 10: secrets
     are rotated)."""
-    exception_links = exception_links or set()
+    exceptions = exceptions or []
     problems = []
     for f in tracked_files(root):
         rel = str(f.relative_to(root))
@@ -622,9 +624,9 @@ def check_markers(root: Path, exception_links: set[str] | None = None) -> list[P
                 problems.append(Problem("Gov §5", "a gitleaks allow marker can't rest on an exception: secrets are rotated, "
                                                   "never excepted (Section 10); use policy-fp only for a confirmed false "
                                                   "positive", rel, i, exceptable=False))
-            elif link and link.group(1).rstrip(".,;") not in exception_links:
+            elif link and not any(e.link == link.group(1).rstrip(".,;") and covers(e, rel) for e in exceptions):
                 problems.append(Problem("Gov §5", f"`exception: {link.group(1)}` names no exception in force in "
-                                                  f"{EXCEPTIONS_FILE}", rel, i, exceptable=False))
+                                                  f"{EXCEPTIONS_FILE} that covers this file", rel, i, exceptable=False))
             elif not link:
                 problems.append(Problem("Gov §5", "a suppression without `policy-fp: <reason> (<link to the review that "
                                                   "confirmed it>)` or `exception: <link>` to an exception in force", rel, i,
@@ -669,7 +671,7 @@ def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
     problems += check_pinned_sources(root)
     problems += check_csp(root, h)
     exceptions, exception_problems = load_exceptions(root)
-    problems += check_markers(root, {e.link for e in exceptions})
+    problems += check_markers(root, exceptions)
     problems += check_exception_changes(root, base, event)
     if os.environ.get("POLICY_SKIP_BROWSERSLIST") != "1":
         problems += check_browserslist(root, h)
@@ -930,29 +932,19 @@ def glob_regex(glob: str) -> re.Pattern:
 
 
 def too_broad(glob: str) -> bool:
-    """A glob that matches an arbitrary file covers everything, which no single finding needs."""
-    rx = glob_regex(glob.lstrip("./"))
-    return any(rx.match(p) for p in ("zq9.xk7", "zq9/yw8/xv7.uk6", "zq9/xv7.uk6"))
+    """A glob must start from a concrete file or directory name: `src/**/*.js` or `admin.html`, never `**/*.js` or
+    `*/*`, which reach across the whole repository."""
+    first = glob.removeprefix("./").split("/")[0]
+    return not first or any(c in first for c in "*?[")
 
 
-def first_written(root: Path, ex_id: str) -> datetime.datetime | None:
-    """When the entry first appeared in git history, or None if it isn't committed yet."""
-    r = subprocess.run(["git", "-C", str(root), "log", "--format=%ct", "--reverse", "-G",
-                        f'"id"[[:space:]]*:[[:space:]]*"{re.escape(ex_id)}"', "--", EXCEPTIONS_FILE],
-                       capture_output=True, text=True)
-    first = r.stdout.split()
-    return datetime.datetime.fromtimestamp(int(first[0]), datetime.timezone.utc) if r.returncode == 0 and first else None
-
-
-def load_exceptions(root: Path, today: datetime.date | None = None,
-                    now: datetime.datetime | None = None) -> tuple[list[Exception_], list[Problem]]:
+def load_exceptions(root: Path, today: datetime.date | None = None) -> tuple[list[Exception_], list[Problem]]:
     """Section 10, as CI reads it: policy-exceptions.json lists each written, time-limited exception. Returns the
     exceptions in force, and the problems with the file itself (invalid, too young or expired entries)."""
     path = root / EXCEPTIONS_FILE
     if not path.is_file():
         return [], []
     today = today or datetime.date.today()
-    now = now or datetime.datetime.now(datetime.timezone.utc)
 
     def bad_file(msg, line=None):
         return [], [Problem("Gov §10", msg, EXCEPTIONS_FILE, line, exceptable=False)]
@@ -985,13 +977,15 @@ def load_exceptions(root: Path, today: datetime.date | None = None,
             elif v:
                 bad.append(f"{k} `{v}` is not YYYY-MM-DD")
         if {"written", "accepted"} <= dates.keys() and dates["accepted"] < dates["written"] + datetime.timedelta(days=1):
-            bad.append("is accepted less than a day after it was written (Section 11: wait 24 hours)")
+            problems.append(Problem("Gov §11", f"{label} is accepted less than a day after it was written; a solo "
+                                               "developer writes the exception and waits 24 hours before accepting it",
+                                    EXCEPTIONS_FILE, level="warning", exceptable=False))
         if {"accepted", "expires"} <= dates.keys() and (dates["expires"] - dates["accepted"]).days > 90:
             bad.append("expires more than 90 days after it was accepted")
         if "accepted" in dates and dates["accepted"] > today:
             bad.append("is accepted in the future")
         rule = str(e.get("rule", "")).strip()
-        if not re.fullmatch(r"(?:[A-Z]{3}-\d+|Gov §\d+(?: \([^)]+\))?|Budgets)", rule):
+        if not re.fullmatch(r"(?:[A-Z]{3}-\d+|Gov §\d+(?: \([^)]+\))?)", rule):
             bad.append(f"rule `{rule}` is not a rule ID (`WEB-8`) or a check label as CI reports it (`Gov §5 (GHSA-...)`)")
         if label in seen:
             bad.append("reuses an id")
@@ -1011,13 +1005,6 @@ def load_exceptions(root: Path, today: datetime.date | None = None,
         if bad:
             problems.append(Problem("Gov §10", f"{label} " + "; ".join(bad), EXCEPTIONS_FILE, exceptable=False))
             continue
-        written_at = first_written(root, label)
-        if written_at is None or now - written_at < datetime.timedelta(hours=24):
-            when = (written_at or now) + datetime.timedelta(hours=24)
-            problems.append(Problem("Gov §10", f"{label} was committed less than 24 hours ago; it takes effect from "
-                                               f"{when:%Y-%m-%d %H:%M} UTC (Section 11: write the exception, then wait "
-                                               "24 hours before accepting it)", EXCEPTIONS_FILE, exceptable=False))
-            continue
         if dates["expires"] < today:
             problems.append(Problem("Gov §10", f"{label} ({rule}) expired on {dates['expires']}: fix the finding and "
                                                "remove the entry, or re-decide and renew it (Section 10)",
@@ -1025,6 +1012,10 @@ def load_exceptions(root: Path, today: datetime.date | None = None,
             continue
         active.append(Exception_(label, rule, files, dates["expires"], dates["accepted"], str(e["link"])))
     return active, problems
+
+
+def covers(e: Exception_, path: str) -> bool:
+    return not e.files or any(glob_regex(g.removeprefix("./")).match(path) for g in e.files)
 
 
 def check_exception_changes(root: Path, base: str | None, event: dict) -> list[Problem]:
@@ -1045,7 +1036,6 @@ def check_exception_changes(root: Path, base: str | None, event: dict) -> list[P
     before = entries(old.stdout) if old.returncode == 0 else {}
     after = entries((root / EXCEPTIONS_FILE).read_text(encoding="utf-8"))
     problems, changed = [], []
-    scope = lambda e: (str(e.get("rule")), tuple(sorted(e.get("files") or [])))
     for ex_id, e in after.items():
         if before.get(ex_id) == e:
             continue
@@ -1056,7 +1046,9 @@ def check_exception_changes(root: Path, base: str | None, event: dict) -> list[P
                                                "a renewal is re-decided and counted, never silent", EXCEPTIONS_FILE))
         if not prev:
             for gone_id, g in before.items():
-                if gone_id not in after and scope(g) == scope(e):
+                overlap = str(g.get("rule")) == str(e.get("rule")) and (
+                    not g.get("files") or not e.get("files") or set(g.get("files")) & set(e.get("files")))
+                if gone_id not in after and overlap:
                     problems.append(Problem("Gov §10", f"{ex_id} re-adds the scope of {gone_id} under a new id; renew "
                                                        f"{gone_id} instead, so its age and renewals stay visible",
                                             EXCEPTIONS_FILE))
@@ -1090,7 +1082,7 @@ def apply_exceptions(problems: list[Problem], exceptions: list[Exception_]) -> l
         for e in exceptions:
             if not rule_matches(p.rule, e.rule):
                 continue
-            if e.files and not (p.file and any(glob_regex(g.lstrip("./")).match(p.file) for g in e.files)):
+            if e.files and not (p.file and covers(e, p.file)):
                 continue
             p.level = "warning"
             p.message += f" (excepted by {e.id} until {e.expires})"
