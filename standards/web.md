@@ -50,11 +50,11 @@ Also applies: [dependencies.md](dependencies.md) for every dependency, including
 *Check:* the same header test as `WEB-7` asserts that these directives are present and that no script directive contains `*` or a scheme-only source.
 
 ### WEB-9
-**Tier T1. MUST.** Text is inserted with `textContent` or framework text interpolation. HTML is inserted only after a maintained sanitizer has processed it. Every HTML sink (`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`) and every framework escape hatch (`dangerouslySetInnerHTML`, `v-html`, `{@html}`, Angular's `bypassSecurityTrust*`) is a review blocker unless its value comes from the sanitizer. ([rationale](../guides/web-rationale.md#a-cost-this-approach-imposes))
-*Check:* a static-analysis rule (Semgrep or similar) flags each sink and escape hatch; every flagged site passes through the sanitizer or carries a Section 10 suppression.
+**Tier T1. MUST.** Text is inserted with `textContent` or framework text interpolation. HTML is inserted only after a maintained sanitizer has processed it. Every HTML sink (`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `srcdoc`) and every framework escape hatch (`dangerouslySetInnerHTML`, `v-html`, `{@html}`, Angular's `bypassSecurityTrust*`) is a review blocker unless its value comes from the sanitizer, or is markup built only from constants (string literals, and values chosen from literals) with no data interpolated. ([rationale](../guides/web-rationale.md#a-cost-this-approach-imposes))
+*Check:* a static-analysis rule (Semgrep or similar) flags each sink and escape hatch; every flagged site passes through the sanitizer, is constant markup marked `policy-fp` (Section 5), or carries a Section 10 suppression. Inline `<script>` blocks in HTML files are scanned too.
 
 ### WEB-10
-**Tier T1. MUST.** A URL that comes from user input or external data, used in `href`, `src`, `action`, `formaction`, `location`, or a redirect, is parsed and checked against an allowlist of schemes before use. `javascript:` and `data:` URLs from such sources are a review blocker.
+**Tier T1. MUST.** A URL that comes from user input or external data, used in `href`, `action`, `formaction`, `location`, a redirect, or the `src` of an element that can run code (`script`, `iframe`, `frame`, `embed`; `object`'s `data`), is parsed and checked against an allowlist of schemes before use. `javascript:` and `data:` URLs from such sources are a review blocker. The `src` of an image or media element is not covered, and a `blob:` or `data:` URL the page created itself from its own data is not external data.
 *Check:* a static-analysis rule flags these assignments; each one routes through a URL validation helper that has unit tests for `javascript:` and `data:` input.
 
 ### WEB-11

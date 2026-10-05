@@ -1,7 +1,8 @@
 # Policy checks for a project. Copy to .github/workflows/policy.yml.
 #
-# Replace every POLICY_SHA with the full commit SHA of the policy release you follow (the one your README's
-# "Policy: vX.Y" names), e.g.:  sed -i "s/POLICY_SHA/$(git ls-remote https://github.com/5wHN28Dg/policy refs/tags/v1.1^{} | cut -f1)/" .github/workflows/policy.yml
+# Pin the policy actions to the full commit SHA of the release your README's "Policy: vX.Y" names, e.g. for v2.0:
+#   sha=$(git ls-remote https://github.com/5wHN28Dg/policy 'refs/tags/v2.0^{}' | cut -f1)
+#   sed -i "s/@POLICY_SHA /@$sha /" .github/workflows/policy.yml
 # Pinning by SHA is DEP-7. Make the jobs below required in branch protection (Section 5), except claude-review,
 # which is advisory.
 #
@@ -28,7 +29,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: 5wHN28Dg/policy/actions/conformance@POLICY_SHA # v1.1
+      - uses: 5wHN28Dg/policy/actions/conformance@POLICY_SHA # v2.0
 
   secrets:
     runs-on: ubuntu-24.04
@@ -36,26 +37,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: 5wHN28Dg/policy/actions/secrets@POLICY_SHA # v1.1
+      - uses: 5wHN28Dg/policy/actions/secrets@POLICY_SHA # v2.0
 
   dependencies:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: 5wHN28Dg/policy/actions/vulns@POLICY_SHA # v1.1
+      - uses: 5wHN28Dg/policy/actions/vulns@POLICY_SHA # v2.0
 
   static-analysis:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: 5wHN28Dg/policy/actions/sast@POLICY_SHA # v1.1
+      - uses: 5wHN28Dg/policy/actions/sast@POLICY_SHA # v2.0
 
   sbom:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: 5wHN28Dg/policy/actions/sbom@POLICY_SHA # v1.1
+      - uses: 5wHN28Dg/policy/actions/sbom@POLICY_SHA # v2.0
 
   claude-review:
     if: >-
@@ -76,6 +77,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false   # the reviewer reads the checkout; keep the token out of .git/config
       - if: steps.secret.outputs.present == 'yes'
-        uses: 5wHN28Dg/policy/actions/claude-review@POLICY_SHA # v1.1
+        uses: 5wHN28Dg/policy/actions/claude-review@POLICY_SHA # v2.0
         with:
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

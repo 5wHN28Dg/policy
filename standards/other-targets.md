@@ -78,7 +78,7 @@ For controls in the HTML UI of a webview or engine-bundling app, `WEB-12` applie
 | Secrets in code and history | As written |
 | Build, lint, formatting | `esphome config` (or the framework's config validation) and `esphome compile` (`OTH-6`) |
 | Unit and integration tests | Unit tests for custom C/C++ code, if any. For YAML-only firmware: `esphome config` and `esphome compile` below T3, plus the release-time board test (`OTH-7`) at T3 |
-| Known-vulnerable dependencies | The framework is pinned in a lockfile or requirements file that the vulnerability scanner reads (ESPHome is a Python package); external components are pinned to a commit and their advisories are checked at each release audit |
+| Known-vulnerable dependencies | The framework is pinned in a lockfile or requirements file that the vulnerability scanner reads (ESPHome is a Python package); external components are pinned to a commit, listed under [`DEP-8`](dependencies.md#dep-8), and their advisories are checked at each release audit |
 | Static security analysis | Runs on custom C/C++ code; not applicable to the YAML config |
 | License compliance | The license field of each external component's dependency record |
 | Software bill of materials | The framework version and each external component with its commit, listed in the release notes |

@@ -30,12 +30,13 @@ Tiers: T0 projects follow only the governance rules for T0 (a secrets scan); the
 
    ```
    Tier: T2
-   Policy: v1.1
+   Policy: v2.0
    Type: web, native
    Users: none
+   Baseline: until 2026-12-31
    ```
 
-   `Type:` lists every project type from the table above that applies (`web`, `native`, `service`, `firmware`, `webview`, `engine-bundling`). `Users: none` is optional: it marks a solo T2 project with no external users yet, which gets the [Section 11](governance/review-audit.md#11-solo-developer-adaptations) lighter-T2 relief. Remove it at the first release others install or depend on, or when the project adds a network-facing service, whichever comes first.
+   `Type:` lists every project type from the table above that applies (`web`, `native`, `service`, `firmware`, `webview`, `engine-bundling`). `Users: none` is optional: it marks a solo T2 project with no external users yet, which gets the [Section 11](governance/review-audit.md#11-solo-developer-adaptations) lighter-T2 relief. Remove it at the first release others install or depend on, or when the project adds a network-facing service, whichever comes first. `Baseline: until <date>` is for an existing project adopting the policy: until that date (at most 90 days ahead), missing artifacts are warnings instead of failures ([Section 1](governance/review-audit.md#1-purpose-and-scope)).
 2. Find the project's type in the table above. Its standard says what else the README must declare: target browsers (`browserslist`), OS versions, or the runtime.
 3. Write `docs/capability-matrix.md` from [the template](templates/capability-matrix.md), before choosing the stack in a new project.
 4. From T2: add `budgets.json` (validate it against [the schema](templates/budgets.schema.json); start from [the example](templates/budgets.example.json) but set your own numbers) and the CI jobs that read it.
@@ -48,16 +49,21 @@ The policy ships the CI that checks it. A project copies [templates/ci/policy.ym
 
 | Action | What it checks | Blocks |
 | --- | --- | --- |
-| [conformance](actions/conformance/action.yml) | README header; required files per tier; `budgets.json` against the schema; loosened budgets without a `Budget change:` line in the PR; `DEP-7` pins; the `WEB-1` resolved browser list | Yes |
-| [secrets](actions/secrets/action.yml) | Section 5 secrets in code and history (gitleaks) | Yes, every tier |
-| [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`) | Every severity on T3; High and Critical on T2; warnings on T1 |
-| [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1; Semgrep's default ruleset from full T2 | Yes |
+| [conformance](actions/conformance/action.yml) | README header and baseline period; required files per tier; `budgets.json` against the schema; loosened budgets without a `Budget change:` line in the PR; `DEP-7` pins; manifests without lockfiles and unpinned requirements (Section 5); `pinned-sources.cdx.json` (`DEP-8`); a CSP exists and allows no inline or eval scripts, as far as the repository shows (`WEB-7`, `WEB-8`); the `WEB-1` resolved browser list | Yes; missing artifacts are warnings during a baseline period |
+| [secrets](actions/secrets/action.yml) | Section 5 secrets in code and history (gitleaks). A project's `.gitleaks.toml` must extend the default rules, and a PR that changes it needs a `Secrets config change:` line | Yes, every tier |
+| [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`), including the sources in `pinned-sources.cdx.json`. Says so when it matched nothing | Every severity on T3; High and Critical on T2; warnings on T1 |
+| [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1, in `.js`/`.ts` files and in the inline `<script>` blocks of HTML files; inline event handlers as `WEB-7` warnings; Semgrep's default ruleset from full T2 | The policy's rules; default-ruleset results of severity ERROR, HIGH or CRITICAL that the rule doesn't rate low-confidence and that aren't audit rules (Section 5). Everything else is a warning |
 | [sbom](actions/sbom/action.yml) | Section 5 SBOM (Syft, CycloneDX) on release tags | No; uploads an artifact |
 | [claude-review](actions/claude-review/action.yml) | A fresh-context Claude review of each PR against Section 6 and the standards, with inline comments and one summary comment | No; advisory |
 
 Everything else a rule's Check names (records, matrices, manual checks, threat-model content) is for the PR review and the release audit.
 
-Known limit: Semgrep's `p/default` ruleset, used from full T2, is fetched from the Semgrep registry at run time and is not versioned, so a registry update can fail a build with no change in the project. Treat such a failure as a new finding, not a broken build.
+Known limits:
+
+- OSV matches few C and C++ sources, so `DEP-8` sources get their advisories checked by hand at each release audit, whatever the scan says.
+- The CSP check sees only what is in the repository, line by line: a directive split across lines is missed. A CSP set outside the repository is declared with a `CSP: set by <where>` line in `docs/threat-model.md`, and the PR review and the release audit check it there.
+- Inline event handlers (`onclick=`) are flagged as `WEB-7` warnings, but the JavaScript inside them is not scanned for `WEB-9`/`WEB-10` sinks. Inline `<script>` blocks get the policy's own rules, not Semgrep's default ruleset.
+- Semgrep's `p/default` ruleset, used from full T2, is fetched from the Semgrep registry at run time and is not versioned, so a registry update can fail a build with no change in the project. Treat such a failure as a new finding, not a broken build.
 
 **PR review (Claude, in CI).** Needs a repository secret `CLAUDE_CODE_OAUTH_TOKEN`: run `claude setup-token` (Claude Pro or Max), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN` in the project. It runs only for PRs from the project's own branches, never from forks. The review is a blind pass (Section 11): `CLAUDE.md`, `CLAUDE.local.md`, `.claude/` and `docs/decisions/` (change the list with the `hide` input) are deleted from its checkout and denied to Claude's file tools, and in-repo Claude settings are not loaded. Claude can read the checkout, the policy and the PR's diff, post inline comments, and nothing else: no shell, no writes, no web. Treat everything in a PR as untrusted, including its description; the summary is scrubbed of anything token-shaped before it is posted. Its output is leads, not findings.
 

@@ -59,13 +59,120 @@ rules:
     languages: [javascript, typescript]
     severity: ERROR
     message: >-
-      WEB-10: a URL built at run time is used as a link, script, form or navigation target. Route it through the
-      project's URL validation helper, which allows only http, https and mailto.
+      WEB-10: a URL built at run time is used as a link, form or navigation target, or as the source of an element
+      that can run code. Route it through the project's URL validation helper, which rejects javascript: and other
+      schemes the project does not allow.
     metadata: { policy-rule: WEB-10 }
     patterns:
       - pattern-either:
           - pattern: $EL.href = $V
-          - pattern: $EL.src = $V
+          # src is a sink unless the element is provably an image or media element (WEB-10).
+          - patterns:
+              - pattern-either:
+                  - pattern: $EL.src = $V
+                  - patterns:
+                      - pattern: $EL.setAttribute($ATTR, $V)
+                      - metavariable-regex:
+                          metavariable: $ATTR
+                          regex: (?i)^["'`]src["'`]$
+              - pattern-not-inside: |
+                  $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  const $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  let $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  var $EL = new Image(...);
+                  ...
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      $EL = document.createElement("object");
+                      ...
+                  - pattern-inside: |
+                      const $EL = document.createElement("object");
+                      ...
+                  - pattern-inside: |
+                      let $EL = document.createElement("object");
+                      ...
+              - pattern-either:
+                  - pattern: $EL.data = $V
+                  - pattern: $EL.setAttribute("data", $V)
           - pattern: $EL.action = $V
           - pattern: $EL.formAction = $V
           - pattern: location.href = $V
@@ -81,10 +188,21 @@ rules:
           - pattern: document.location.assign($V)
           - pattern: document.location.replace($V)
           - pattern: window.open($V, ...)
-          - pattern: $EL.setAttribute("href", $V)
-          - pattern: $EL.setAttribute("src", $V)
-          - pattern: $EL.setAttribute("action", $V)
-          - pattern: $EL.setAttribute("formaction", $V)
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]href["'`]$
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]action["'`]$
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]formaction["'`]$
       - pattern-not: $X = "..."
       - pattern-not: window.open("...", ...)
       - pattern-not: $LOC.assign("...")
@@ -93,6 +211,9 @@ rules:
       - pattern-not: $EL.$P = $U.safeUrl(...)
       - pattern-not: $L.$M($U.safeUrl(...), ...)
       - pattern-not: $EL.setAttribute($A, $U.safeUrl(...))
+      # A blob: or data: URL the page made from its own data is not external data (WEB-10), but only a reviewer can
+      # tell where the data came from (a blob of fetched HTML in an iframe runs as this origin), so such sites are
+      # marked policy-fp after review instead of being exempted here.
 
   - id: web-10-javascript-url-literal
     languages: [javascript, typescript]
@@ -103,3 +224,14 @@ rules:
     paths:
       exclude: ["*.test.*", "*.spec.*", "**/test/**", "**/tests/**", "**/__tests__/**"]
     pattern-regex: '(?i)["`'']\s*javascript:'
+
+  - id: web-7-inline-event-handler
+    languages: [generic]
+    paths:
+      include: ["*.html", "*.htm"]
+    severity: WARNING
+    message: >-
+      WEB-7: an inline event handler attribute. It only runs under a CSP that allows 'unsafe-inline' (or
+      'unsafe-hashes') for scripts, which WEB-7 forbids. Attach the handler with addEventListener.
+    metadata: { policy-rule: WEB-7 }
+    pattern-regex: (?i)<[a-z][^>]*\son[a-z]+\s*=\s*["'][^"']

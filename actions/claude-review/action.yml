@@ -67,7 +67,8 @@ runs:
         text = open(os.path.join(os.environ["POLICY_DIR"], "prompts", "pr-review.md"), encoding="utf-8").read()
         values = {"POLICY_DIR": os.environ["POLICY_DIR"], "PR_NUMBER": os.environ["PR_NUMBER"],
                   "REPOSITORY": os.environ["REPOSITORY"], "PR_FILE": os.environ["REVIEW_DIR"] + "/pr.md",
-                  "DIFF_FILE": os.environ["REVIEW_DIR"] + "/pr.diff"}
+                  "DIFF_FILE": os.environ["REVIEW_DIR"] + "/pr.diff",
+                  "HIDDEN": ", ".join(f"`{p}`" for p in os.environ.get("HIDE", "").split()) or "none"}
         for k, v in values.items():
             text = text.replace("{{" + k + "}}", v)
         sys.stdout.write(text)' > "$review_dir/prompt.md"

@@ -42,6 +42,15 @@
       "startupMs": 800,
       "memoryMB": 60,
       "installedSizeMB": 25
+    },
+    "android": {
+      "measuredOn": "Samsung Galaxy Note 9, release build, battery saver off",
+      "measuredWhere": "release-test",
+      "scenario": "cold start to the first usable screen; memory after opening one drawing",
+      "runs": 5,
+      "startupMs": 1500,
+      "memoryMB": 180,
+      "installedSizeMB": 40
     }
   },
   "custom": [
