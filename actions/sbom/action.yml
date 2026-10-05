@@ -1,0 +1,23 @@
+name: Policy SBOM
+description: >-
+  Section 5, software bill of materials: a CycloneDX SBOM generated with Syft and uploaded as an artifact.
+  Run on release tags (T2 and up).
+inputs:
+  name:
+    description: Artifact name
+    default: sbom
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: >-
+        "${{ github.action_path }}/../../tools/fetch-tool.sh" syft
+        https://github.com/anchore/syft/releases/download/v1.54.0/syft_1.54.0_linux_amd64.tar.gz
+        54a87372498168b2d033e876fd41fa4e8035b872699e525a57046e1f2f09c860 syft
+    - shell: bash
+      working-directory: ${{ github.workspace }}
+      run: syft scan dir:. --output cyclonedx-json="$RUNNER_TEMP/sbom.cdx.json"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ runner.temp }}/sbom.cdx.json

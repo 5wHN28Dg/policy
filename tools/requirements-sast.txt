@@ -1,0 +1,2 @@
+# Pinned for the static-analysis action.
+semgrep==1.179.0

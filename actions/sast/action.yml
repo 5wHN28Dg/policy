@@ -1,0 +1,39 @@
+name: Policy static analysis
+description: >-
+  WEB-9 and WEB-10 sink rules for projects with an HTML UI (web, webview, engine-bundling) from T1, plus
+  Section 5 static security analysis (Semgrep's default ruleset, blocking on ERROR) from full T2.
+runs:
+  using: composite
+  steps:
+    - id: plan
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        header=$(python3 "${{ github.action_path }}/../../tools/policy_check.py" header --root .)
+        python3 - "$header" >> "$GITHUB_OUTPUT" <<'PY'
+        import json, sys
+        h = json.loads(sys.argv[1])
+        tier = int(h["tier"][1]) if h["tier"] and h["tier"][:1] == "T" and h["tier"][1:].isdigit() else 2
+        web = bool({"web", "webview", "engine-bundling"} & set(h["types"]))
+        full = tier >= 2 and not h["lighter_t2"]
+        print(f"web={'true' if web and tier >= 1 else 'false'}")
+        print(f"full={'true' if full else 'false'}")
+        PY
+    - if: steps.plan.outputs.web == 'true' || steps.plan.outputs.full == 'true'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: '3.13'
+    - if: steps.plan.outputs.web == 'true' || steps.plan.outputs.full == 'true'
+      shell: bash
+      run: python -m pip install --quiet --disable-pip-version-check -r "${{ github.action_path }}/../../tools/requirements-sast.txt"
+    - if: steps.plan.outputs.web == 'true' || steps.plan.outputs.full == 'true'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        WEB: ${{ steps.plan.outputs.web }}
+        FULL: ${{ steps.plan.outputs.full }}
+      run: |
+        configs=()
+        [[ $WEB == true ]] && configs+=(--config "${{ github.action_path }}/../../semgrep/web-sinks.yml")
+        [[ $FULL == true ]] && configs+=(--config p/default)
+        semgrep scan --metrics off --severity ERROR --error --exclude "*.min.js" "${configs[@]}" .

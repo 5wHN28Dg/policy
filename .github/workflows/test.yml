@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Checker tests
+        run: |
+          python -m pip install --quiet -r tools/requirements.txt
+          python -m unittest discover -s tools/tests -v
+      - name: Semgrep rule tests
+        run: |
+          python -m venv /tmp/sg && /tmp/sg/bin/pip install --quiet -r tools/requirements-sast.txt
+          /tmp/sg/bin/semgrep --test --metrics off semgrep
+      - name: Budgets example validates
+        run: python -c "import json,jsonschema; jsonschema.Draft202012Validator(json.load(open('templates/budgets.schema.json'))).validate(json.load(open('templates/budgets.example.json')))"
+      - name: Shell scripts parse
+        run: bash -n tools/audit.sh tools/fetch-tool.sh
+      - name: The policy repo pins its own actions (DEP-7)
+        run: python tools/policy_check.py pins
