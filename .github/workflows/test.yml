@@ -41,33 +41,33 @@ jobs:
       - name: Conformance passes on the good fixture
         uses: ./actions/conformance
         with:
-          working-directory: tools/tests/fixtures/good-project
+          working-directory: fixtures/good-project
       - name: Dependency scan passes on the good fixture
         uses: ./actions/vulns
         with:
-          working-directory: tools/tests/fixtures/good-project
+          working-directory: fixtures/good-project
       - name: Static analysis passes on the good fixture
         uses: ./actions/sast
         with:
-          working-directory: tools/tests/fixtures/good-project
+          working-directory: fixtures/good-project
       - id: bad-conformance
         name: Conformance fails on the bad fixture
         continue-on-error: true
         uses: ./actions/conformance
         with:
-          working-directory: tools/tests/fixtures/bad-project
+          working-directory: fixtures/bad-project
       - id: bad-vulns
         name: Dependency scan fails on the bad fixture
         continue-on-error: true
         uses: ./actions/vulns
         with:
-          working-directory: tools/tests/fixtures/bad-project
+          working-directory: fixtures/bad-project
       - id: bad-sast
         name: Static analysis fails on the bad fixture
         continue-on-error: true
         uses: ./actions/sast
         with:
-          working-directory: tools/tests/fixtures/bad-project
+          working-directory: fixtures/bad-project
       - name: The bad fixture failed every check
         env:
           RESULTS: ${{ steps.bad-conformance.outcome }} ${{ steps.bad-vulns.outcome }} ${{ steps.bad-sast.outcome }}
