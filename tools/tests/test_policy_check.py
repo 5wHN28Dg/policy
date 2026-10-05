@@ -1,5 +1,6 @@
 """Tests for tools/policy_check.py. Run: python3 -m unittest discover -s tools/tests"""
 
+import datetime
 import json
 import os
 import subprocess
@@ -30,6 +31,8 @@ def compliant_project(root: Path, tier: str = "T2", types: str = "native") -> No
     write(root, "license-allowlist.txt", "MIT\nApache-2.0\n")
     write(root, "budgets.json", EXAMPLE_BUDGETS)
     write(root, ".github/workflows/ci.yml", f"jobs:\n  a:\n    steps:\n      - uses: actions/checkout@{SHA} # v7\n")
+    if "web" in types:
+        write(root, "index.html", "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'; object-src 'none'; base-uri 'none'\">\n")
 
 
 def rules(problems):
@@ -237,7 +240,7 @@ class BudgetLooseningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             base = self.repo(Path(d), old, new)
             msg = pc.check_budget_loosening(Path(d), base, {})[0].message
-            self.assertIn("native.linux.startupMs: removed", msg)
+            self.assertIn("native.linux@ci.startupMs: removed", msg)
             self.assertIn("firmware flash used]@ci.max: removed", msg)
 
     def test_tightening_is_fine(self):
@@ -376,3 +379,203 @@ class LicenseGateTests(unittest.TestCase):
 
     def test_missing_report_is_clean(self):
         self.assertEqual(pc.vuln_gate(Path("/nonexistent.json"), "T3"), ([], []))
+
+
+class BaselineTests(unittest.TestCase):
+    def setUp(self):
+        os.environ["POLICY_SKIP_BROWSERSLIST"] = "1"
+
+    def project(self, root, baseline):
+        compliant_project(root)
+        write(root, "README.md", f"Tier: T2\nPolicy: v1.2\nType: native\nBaseline: {baseline}\n")
+        for f in ("docs/threat-model.md", "budgets.json"):
+            (root / f).unlink()
+
+    def test_active_baseline_turns_missing_artifacts_into_warnings(self):
+        until = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.project(root, f"until {until}")
+            write(root, ".github/workflows/x.yml", "steps:\n  - uses: actions/checkout@v7\n")
+            problems = pc.conformance(root, None, {})
+            errors = [p.rule for p in problems if p.level == "error"]
+            warnings = sorted(p.rule for p in problems if p.level == "warning")
+            self.assertEqual(errors, ["DEP-7"])  # not an artifact: still blocks
+            self.assertEqual(warnings, ["Gov §1", "Gov §4", "NAT-7"])
+
+    def test_expired_or_too_long_baseline_blocks(self):
+        past = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        far = (datetime.date.today() + datetime.timedelta(days=120)).isoformat()
+        for value, text in ((f"until {past}", "ended"), (f"until {far}", "more than 90"), ("soon", "form")):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                self.project(root, value)
+                problems = pc.conformance(root, None, {})
+                self.assertTrue(any(text in p.message and p.level == "error" for p in problems), value)
+                self.assertTrue(all(p.level == "error" for p in problems if p.artifact), value)
+
+
+class LockfileTests(unittest.TestCase):
+    def check(self, files, tier="T2"):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in files.items():
+                write(Path(d), rel, text)
+            return pc.check_lockfiles(Path(d), pc.Header(tier=tier, types=["native"]))
+
+    def test_gradle_and_npm_without_lockfiles(self):
+        problems = self.check({"android/app/build.gradle.kts": "plugins {}\n",
+                               "web/package.json": '{"dependencies": {"x": "1"}}',
+                               "ok/package.json": '{"dependencies": {"x": "1"}}', "ok/package-lock.json": "{}",
+                               "empty/package.json": '{"name": "no-deps"}'})
+        self.assertEqual(sorted(p.file for p in problems), ["android/app/build.gradle.kts", "web/package.json"])
+        self.assertTrue(all(p.level == "error" and p.artifact for p in problems))
+
+    def test_gradle_lockfile_anywhere_counts(self):
+        self.assertEqual(self.check({"android/app/build.gradle.kts": "x", "android/gradle.lockfile": "x"}), [])
+
+    def test_unpinned_requirements(self):
+        problems = self.check({"requirements-dev.txt": "pytest\nrequests==2.32.0\n# comment\n-r other.txt\nblack>=24\n"})
+        self.assertEqual([p.line for p in problems], [1, 5])
+
+    def test_t1_warns(self):
+        problems = self.check({"build.gradle": "x"}, tier="T1")
+        self.assertEqual([p.level for p in problems], ["warning"])
+
+
+class PinnedSourcesTests(unittest.TestCase):
+    def check(self, bom):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "pinned-sources.cdx.json", json.dumps(bom))
+            return pc.check_pinned_sources(Path(d))
+
+    def test_complete_component_passes(self):
+        good = {"bomFormat": "CycloneDX", "specVersion": "1.5", "components": [{
+            "name": "zlib", "version": "1.3.1", "licenses": [{"license": {"id": "Zlib"}}],
+            "externalReferences": [{"type": "distribution", "url": "https://zlib.net/zlib-1.3.1.tar.gz",
+                                    "hashes": [{"alg": "SHA-256", "content": "ab"}]}]}]}
+        self.assertEqual(self.check(good), [])
+
+    def test_commit_as_version_counts_as_pin(self):
+        bom = {"bomFormat": "CycloneDX", "components": [{"name": "emsdk", "version": "a" * 40,
+               "licenses": [{"license": {"id": "MIT"}}], "externalReferences": [{"url": "https://github.com/x/y"}]}]}
+        self.assertEqual(self.check(bom), [])
+
+    def test_missing_fields(self):
+        problems = self.check({"bomFormat": "CycloneDX", "components": [{"name": "sqlite", "version": "3.46"}]})
+        self.assertEqual(len(problems), 1)
+        for word in ("URL", "pinned hash", "licenses"):
+            self.assertIn(word, problems[0].message)
+
+    def test_not_cyclonedx(self):
+        self.assertIn("CycloneDX", self.check({"components": []})[0].message)
+
+
+class CspTests(unittest.TestCase):
+    def check(self, files, tier="T2", types=("web",)):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in files.items():
+                write(Path(d), rel, text)
+            return pc.check_csp(Path(d), pc.Header(tier=tier, types=list(types)))
+
+    def test_no_csp_at_t2(self):
+        self.assertEqual([p.rule for p in self.check({"index.html": "<p>hi</p>"})], ["WEB-8"])
+        self.assertEqual(self.check({"index.html": "<p>hi</p>"}, tier="T1"), [])
+        self.assertEqual(self.check({"main.kt": "x"}, types=("native",)), [])
+
+    def test_unsafe_inline_in_script_directive(self):
+        problems = self.check({"server/headers.py": 'CSP = "default-src \'self\'; script-src \'self\' \'unsafe-inline\'"\n'})
+        self.assertEqual([(p.rule, p.line) for p in problems], [("WEB-7", 1)])
+
+    def test_unsafe_inline_only_in_style_is_fine(self):
+        problems = self.check({"index.html": "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'; style-src 'self' 'unsafe-inline'\">"})
+        self.assertEqual(problems, [])
+
+    def test_default_src_counts_when_no_script_src(self):
+        problems = self.check({"_headers": "Content-Security-Policy: default-src 'self' 'unsafe-eval'\n"})
+        self.assertEqual([p.rule for p in problems], ["WEB-7"])
+
+    def test_markdown_mentions_are_ignored(self):
+        self.assertEqual([p.rule for p in self.check({"docs/csp.md": "never use script-src 'unsafe-inline'"})], ["WEB-8"])
+
+
+class GitleaksConfigTests(unittest.TestCase):
+    def test_must_extend_defaults(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), ".gitleaks.toml", "[allowlist]\npaths = ['''ref/vectors/''']\n")
+            self.assertIn("useDefault", pc.check_gitleaks_config(Path(d), None, {})[0].message)
+            write(Path(d), ".gitleaks.toml", "[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''ref/vectors/''']\n")
+            self.assertEqual(pc.check_gitleaks_config(Path(d), None, {}), [])
+
+    def test_pr_change_needs_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+            write(root, "README.md", "x")
+            subprocess.run(["git", "-C", d, "add", "."], check=True)
+            subprocess.run(["git", "-C", d, "commit", "-qm", "base"], check=True, env=env)
+            write(root, ".gitleaks.toml", "[extend]\nuseDefault = true\n")
+            problems = pc.check_gitleaks_config(root, "HEAD", {"pull_request": {"body": "Adds vectors."}})
+            self.assertIn("Secrets config change", problems[0].message)
+            self.assertEqual(pc.check_gitleaks_config(root, "HEAD", {"pull_request": {"body": "Secrets config change: test vectors"}}), [])
+
+
+class InlineScriptTests(unittest.TestCase):
+    PAGE = ("<html>\n<head><script src=\"app.js\"></script>\n<script type=\"application/ld+json\">{\"a\": 1}</script>\n"
+            "</head>\n<body onclick=\"go()\">\n<script>\nconst x = 1;\nel.innerHTML = data;\n</script>\n"
+            "<script type=module>\nlocation.href = next;\n</script>\n</body></html>\n")
+
+    def test_keeps_line_numbers_and_only_inline_js(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            write(Path(d), "admin.html", self.PAGE)
+            mapping = pc.extract_inline(Path(d), Path(out))
+            (copy, orig), = mapping.items()
+            self.assertEqual(orig, "admin.html")
+            lines = Path(copy).read_text().splitlines()
+            self.assertEqual(len(lines), len(self.PAGE.splitlines()))
+            self.assertEqual(lines[7].strip(), "el.innerHTML = data;")
+            self.assertEqual(lines[10].strip(), "location.href = next;")
+            text = Path(copy).read_text()
+            self.assertNotIn("onclick", text)
+            self.assertNotIn('"a": 1', text)
+            self.assertNotIn("app.js", text)
+
+    def test_files_without_inline_scripts_are_skipped(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            write(Path(d), "a.html", "<p>no scripts</p>")
+            self.assertEqual(pc.extract_inline(Path(d), Path(out)), {})
+
+
+class SastGateTests(unittest.TestCase):
+    def report(self, d, results):
+        p = Path(d) / f"r{len(list(Path(d).iterdir()))}.json"
+        p.write_text(json.dumps({"results": results}))
+        return p
+
+    def result(self, check_id, path, line, severity, **meta):
+        return {"check_id": check_id, "path": path, "start": {"line": line},
+                "extra": {"message": "msg", "severity": severity, "metadata": meta}}
+
+    def test_levels(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self.report(d, [
+                self.result("semgrep.web-9-html-sink-assignment", "a.js", 1, "ERROR", **{"policy-rule": "WEB-9"}),
+                self.result("semgrep.web-7-inline-event-handler", "a.html", 2, "WARNING", **{"policy-rule": "WEB-7"}),
+                self.result("javascript.lang.security.detect-insecure-websocket", "x.nim", 3, "ERROR",
+                            confidence="LOW", subcategory=["audit"]),
+                self.result("python.lang.security.audit.eval", "y.py", 4, "ERROR", confidence="HIGH", subcategory=["vuln"]),
+                self.result("generic.secrets.thing", "z", 5, "WARNING", confidence="HIGH"),
+            ])
+            problems = pc.sast_gate([r])
+            self.assertEqual([(p.rule, p.level) for p in problems], [
+                ("WEB-9", "error"), ("WEB-7", "warning"), ("Gov §5 (detect-insecure-websocket)", "warning"),
+                ("Gov §5 (eval)", "error"), ("Gov §5 (thing)", "warning")])
+
+    def test_inline_paths_map_back_and_dedupe(self):
+        with tempfile.TemporaryDirectory() as d:
+            copy = str(Path(d) / "admin.html.inline.js")
+            Path(copy).write_text("")
+            r1 = self.report(d, [self.result("x.web-9-html-sink-assignment", copy, 9, "ERROR", **{"policy-rule": "WEB-9"})])
+            r2 = self.report(d, [self.result("x.web-9-html-sink-assignment", copy, 9, "ERROR", **{"policy-rule": "WEB-9"})])
+            problems = pc.sast_gate([r1, r2], {copy: "admin.html"})
+            self.assertEqual([(p.file, p.line) for p in problems], [("admin.html", 9)])

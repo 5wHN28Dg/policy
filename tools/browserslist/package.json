@@ -1,0 +1,8 @@
+{
+  "name": "policy-browserslist",
+  "private": true,
+  "description": "Pinned browserslist for the WEB-1 check; npm ci verifies every package against package-lock.json.",
+  "dependencies": {
+    "browserslist": "4.29.3"
+  }
+}

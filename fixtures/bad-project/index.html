@@ -1,0 +1,8 @@
+<!doctype html>
+<p id="out"></p>
+<button onclick="show()">Show</button>
+<script>
+function show() {
+  document.getElementById("out").innerHTML = location.hash.slice(1);
+}
+</script>

@@ -8,6 +8,9 @@ Usage:
     policy_check.py vulns --report FILE [--root DIR]
     policy_check.py licenses --report FILE
     policy_check.py pins [--root DIR]
+    policy_check.py secrets-config [--root DIR] [--base REF]
+    policy_check.py extract-inline --root DIR --out DIR
+    policy_check.py sast --report FILE [--report FILE] [--map FILE]
 
 `conformance` prints one line per problem, as GitHub annotations when run in
 Actions, and exits 1 if any rule fails. `tier` prints the declared tier
@@ -15,6 +18,9 @@ Actions, and exits 1 if any rule fails. `tier` prints the declared tier
 Section 5 gate to an osv-scanner JSON report: warnings on T1, failure on High
 or Critical (CVSS 7.0 and up) on T2, failure on any severity on T3. `licenses` fails on license violations in an
 osv-scanner report made with --licenses. `pins` runs only the DEP-7 check.
+`secrets-config` checks a project's .gitleaks.toml. `extract-inline` copies the
+inline <script> blocks of HTML files out for Semgrep, and `sast` gates Semgrep
+JSON reports.
 
 Each problem names the rule it comes from, so a finding can cite it.
 """
@@ -22,6 +28,8 @@ Each problem names the rule it comes from, so a finding can cite it.
 from __future__ import annotations
 
 import argparse
+import datetime
+import fnmatch
 import json
 import os
 import re
@@ -46,6 +54,7 @@ class Header:
     policy: str | None = None
     types: list[str] = field(default_factory=list)
     users: str | None = None
+    baseline: str | None = None
 
     @property
     def tier_num(self) -> int:
@@ -63,6 +72,8 @@ class Problem:
     message: str
     file: str | None = None
     line: int | None = None
+    level: str = "error"     # "error" fails the check; "warning" is reported only
+    artifact: bool = False   # a missing artifact, which a Baseline period turns into a warning (Section 1)
 
 
 def read_header(root: Path) -> Header:
@@ -81,7 +92,7 @@ def read_header(root: Path) -> Header:
         if re.match(r"^#{2,}\s", raw):
             break  # the header lines belong at the top, before the first section
         line = raw.strip().strip("*_").strip()
-        m = re.match(r"(?i)^(tier|policy|type|users)\s*:\s*\**\s*(.+?)\s*\**$", line)
+        m = re.match(r"(?i)^(tier|policy|type|users|baseline)\s*:\s*\**\s*(.+?)\s*\**$", line)
         if not m:
             continue
         key = m.group(1).lower()
@@ -95,6 +106,8 @@ def read_header(root: Path) -> Header:
             header.types = [v.strip().lower() for v in value.split(",") if v.strip()]
         elif key == "users" and header.users is None:
             header.users = value
+        elif key == "baseline" and header.baseline is None:
+            header.baseline = value
     return header
 
 
@@ -125,16 +138,17 @@ def check_files(root: Path, h: Header) -> list[Problem]:
     if n >= 1 and not any((root / d / "SECURITY.md").is_file() for d in (".", ".github", "docs")):
         problems.append(Problem("Gov §1", "SECURITY.md is missing (how to report a vulnerability)"))
     if n >= 2 and not h.lighter_t2 and not (root / "docs" / "threat-model.md").is_file():
-        problems.append(Problem("Gov §4", "docs/threat-model.md is missing (required from T2)"))
+        problems.append(Problem("Gov §4", "docs/threat-model.md is missing (required from T2)", artifact=True))
     if n >= 1:
         matrix = root / "docs" / "capability-matrix.md"
         rule = "/".join(r for t, r in (("web", "WEB-1"), ("native", "NAT-3")) if t in h.types) or "OTH-2"
         if not matrix.is_file():
-            problems.append(Problem(rule, "docs/capability-matrix.md is missing"))
+            problems.append(Problem(rule, "docs/capability-matrix.md is missing", artifact=True))
         elif not re.search(r"(?im)^\s*Checked:\s*\S", matrix.read_text(encoding="utf-8", errors="replace")):
             problems.append(Problem(rule, "the capability matrix has no `Checked:` date", "docs/capability-matrix.md"))
     if n >= 2 and not h.lighter_t2 and not (root / "license-allowlist.txt").is_file():
-        problems.append(Problem("Gov §5", "license-allowlist.txt is missing (the written license policy: one allowed SPDX id per line)"))
+        problems.append(Problem("Gov §5", "license-allowlist.txt is missing (the written license policy: one allowed SPDX id per line)",
+                                artifact=True))
     return problems
 
 
@@ -144,7 +158,7 @@ def check_budgets(root: Path, h: Header) -> list[Problem]:
         if not path.is_file():
             return []
     elif not path.is_file():
-        return [Problem(budget_rule(h), "budgets.json is missing (required from T2)")]
+        return [Problem(budget_rule(h), "budgets.json is missing (required from T2)", artifact=True)]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -182,9 +196,12 @@ def thresholds(data: dict) -> dict[str, tuple[str, float]]:
             if k.endswith(("Ms", "KB")) or k == "cls":
                 out[f"web.{section}.{k}"] = ("max", v)
     for platform, m in data.get("native", {}).items():
-        for k in ("startupMs", "memoryMB", "installedSizeMB"):
+        where = m.get("measuredWhere", "ci")
+        for k in ("startupMs", "memoryMB"):
             if k in m:
-                out[f"native.{platform}.{k}"] = ("max", m[k])
+                out[f"native.{platform}@{where}.{k}"] = ("max", m[k])
+        if "installedSizeMB" in m:
+            out[f"native.{platform}.installedSizeMB"] = ("max", m["installedSizeMB"])
     for c in data.get("custom", []):
         where = c.get("measuredWhere", "ci")
         for d in ("max", "min"):
@@ -308,10 +325,12 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
         pkg.is_file() and "browserslist" in json.loads(pkg.read_text(encoding="utf-8") or "{}"))
     if not has_config:
         return [Problem("WEB-2", "no browserslist declaration (.browserslistrc or the `browserslist` key in package.json)")]
-    version = os.environ.get("BROWSERSLIST_VERSION", "4.29.3")
+    # In CI, the conformance action installs the policy's lockfile-pinned browserslist and sets BROWSERSLIST_BIN.
+    # Locally, fall back to npx with the same version (not integrity-checked).
+    binary = os.environ.get("BROWSERSLIST_BIN")
+    cmd = [binary] if binary else ["npx", "--yes", "browserslist@4.29.3"]
     try:
-        out = subprocess.run(["npx", "--yes", f"browserslist@{version}"], cwd=root,
-                             check=True, capture_output=True, text=True, timeout=300).stdout
+        out = subprocess.run(cmd, cwd=root, check=True, capture_output=True, text=True, timeout=300).stdout
     except (OSError, subprocess.SubprocessError) as e:
         return [Problem("WEB-1", f"could not resolve the browser list with npx browserslist: {e}")]
     resolved = {l.strip() for l in out.splitlines() if l.strip()}
@@ -351,17 +370,180 @@ def recorded_browsers(matrix: Path) -> set[str] | None:
     return None
 
 
+def tracked_files(root: Path) -> list[Path]:
+    """Files git tracks under root, or every file when root is not a git work tree."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "."], check=True,
+                             capture_output=True, text=True).stdout
+        files = [root / f for f in out.split("\0") if f]
+        if files:
+            return [f for f in files if f.is_file()]
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return [p for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts]
+
+
+# (manifest pattern, lockfiles that pin it, ecosystem)
+LOCKFILES = [
+    ("package.json", ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"), "npm"),
+    ("build.gradle", ("gradle.lockfile",), "Gradle"),
+    ("build.gradle.kts", ("gradle.lockfile",), "Gradle"),
+    ("pyproject.toml", ("poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.txt"), "Python"),
+    ("Pipfile", ("Pipfile.lock",), "Python"),
+    ("Cargo.toml", ("Cargo.lock",), "Cargo"),
+    ("go.mod", ("go.sum",), "Go"),
+    ("Gemfile", ("Gemfile.lock",), "Bundler"),
+    ("composer.json", ("composer.lock",), "Composer"),
+    ("*.nimble", ("nimble.lock",), "Nimble"),
+]
+
+
+def check_lockfiles(root: Path, h: Header) -> list[Problem]:
+    """Section 5: dependencies are pinned by lockfile. A manifest without its lockfile is neither pinned nor scanned."""
+    problems = []
+    level = "error" if h.tier_num >= 2 and not h.lighter_t2 else "warning"
+    files = tracked_files(root)
+    names_by_dir: dict[Path, set[str]] = {}
+    for f in files:
+        names_by_dir.setdefault(f.parent, set()).add(f.name)
+    gradle_root_locks = any("gradle.lockfile" in names for names in names_by_dir.values())
+    for f in files:
+        rel = str(f.relative_to(root))
+        if "node_modules" in f.parts or "/vendor/" in f"/{rel}" or rel.startswith(("fixtures/", "test/", "tests/")):
+            continue
+        for pattern, locks, eco in LOCKFILES:
+            if not fnmatch.fnmatch(f.name, pattern):
+                continue
+            here = names_by_dir.get(f.parent, set())
+            if any(l in here for l in locks) or (eco == "Gradle" and gradle_root_locks):
+                continue
+            if eco == "npm" and not json.loads(f.read_text(encoding="utf-8", errors="replace") or "{}").get(
+                    "dependencies") and not json.loads(f.read_text(encoding="utf-8", errors="replace") or "{}").get("devDependencies"):
+                continue
+            hint = "enable dependency locking (`./gradlew dependencies --write-locks`)" if eco == "Gradle" else \
+                   f"commit its lockfile ({', '.join(locks[:2])})"
+            problems.append(Problem("Gov §5", f"{eco} manifest without a lockfile: its dependencies are neither pinned "
+                                              f"nor scanned; {hint}", rel, level=level, artifact=True))
+    for f in files:
+        if re.fullmatch(r"requirements[\w.-]*\.txt", f.name) and "node_modules" not in f.parts:
+            for i, raw in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                line = raw.split("#")[0].strip()
+                if not line or line.startswith(("-", "--")) or "==" in line or "@" in line:
+                    continue
+                problems.append(Problem("Gov §5", f"`{line}` is not pinned to an exact version (`==`); the scanner skips "
+                                                  "unpinned requirements", str(f.relative_to(root)), i, level=level, artifact=True))
+    return problems
+
+
+def check_pinned_sources(root: Path) -> list[Problem]:
+    """DEP-8: pinned-sources.cdx.json lists third-party code that no lockfile can express."""
+    path = root / "pinned-sources.cdx.json"
+    if not path.is_file():
+        return []
+    rel = "pinned-sources.cdx.json"
+    try:
+        bom = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return [Problem("DEP-8", f"not valid JSON: {e.msg}", rel, e.lineno)]
+    problems = []
+    if bom.get("bomFormat") != "CycloneDX":
+        problems.append(Problem("DEP-8", 'not a CycloneDX file ("bomFormat": "CycloneDX" is missing)', rel))
+    for i, c in enumerate(bom.get("components") or []):
+        name = c.get("name") or f"component {i + 1}"
+        missing = [k for k in ("name", "version") if not c.get(k)]
+        refs = c.get("externalReferences") or []
+        if not any(r.get("url") for r in refs):
+            missing.append("the URL it is fetched from (externalReferences[].url)")
+        hashes = (c.get("hashes") or []) + [h for r in refs for h in (r.get("hashes") or [])]
+        if not hashes and not re.fullmatch(r"[0-9a-f]{40}", str(c.get("version", ""))):
+            missing.append("a pinned hash (hashes) or a full commit as version")
+        if not c.get("licenses"):
+            missing.append("licenses")
+        if missing:
+            problems.append(Problem("DEP-8", f"`{name}` lacks {', '.join(missing)}", rel))
+    if not bom.get("components"):
+        problems.append(Problem("DEP-8", "lists no components", rel))
+    return problems
+
+
+CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".ts", ".py", ".nim", ".go", ".rs", ".kt", ".java", ".rb",
+                  ".php", ".json", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
+CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}
+
+
+def check_csp(root: Path, h: Header) -> list[Problem]:
+    """WEB-7 and WEB-8, as far as the repository shows them: a CSP exists, and no script directive allows inline or
+    eval. CSPs set outside the repository can't be seen here; the PR review and the release audit check those."""
+    if not WEB_UI_TYPES & set(h.types):
+        return []
+    found = False
+    problems = []
+    for f in tracked_files(root):
+        if f.suffix.lower() not in CSP_SOURCE_EXT and f.name not in CSP_SOURCE_NAMES:
+            continue
+        rel = str(f.relative_to(root))
+        if rel.startswith(("fixtures/", "test/", "tests/")) or "/test/" in rel or "/tests/" in rel:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "content-security-policy" not in text.lower() and "script-src" not in text:
+            continue
+        found = True
+        for i, line in enumerate(text.splitlines(), 1):
+            for directive in re.findall(r"(?i)\b(?:script-src(?:-elem|-attr)?|default-src)\b[^;\"'`]*(?:'[^']*'[^;\"`]*)*", line):
+                bad = [k for k in ("'unsafe-inline'", "'unsafe-eval'") if k in directive.lower()]
+                if bad and (directive.lower().startswith("script-src") or "script-src" not in line.lower()):
+                    problems.append(Problem("WEB-7", f"a script directive allows {' and '.join(bad)}", rel, i))
+    if not found and h.tier_num >= 2:
+        problems.append(Problem("WEB-8", "no Content-Security-Policy found anywhere in the repository (a meta tag, "
+                                         "server code or hosting config). If it is set outside the repository, say where "
+                                         "in docs/threat-model.md; the review checks it there"))
+    return problems
+
+
+def baseline_state(h: Header, today: datetime.date | None = None) -> tuple[bool, list[Problem]]:
+    """Section 1: until the Baseline date, missing artifacts are warnings. Returns (active, problems)."""
+    if not h.baseline:
+        return False, []
+    today = today or datetime.date.today()
+    m = re.match(r"(?i)^until\s+(\d{4}-\d{2}-\d{2})$", h.baseline.strip())
+    if not m:
+        return False, [Problem("Gov §1", f"README `Baseline: {h.baseline}` is not in the form `Baseline: until YYYY-MM-DD`", "README.md")]
+    try:
+        until = datetime.date.fromisoformat(m.group(1))
+    except ValueError:
+        return False, [Problem("Gov §1", f"README baseline date `{m.group(1)}` is not a valid date", "README.md")]
+    if until < today:
+        return False, [Problem("Gov §1", f"the baseline period ended on {until}: complete the baseline audit, remove the "
+                                         "`Baseline:` line, and fix the missing artifacts", "README.md")]
+    if (until - today).days > 90:
+        return False, [Problem("Gov §1", f"the baseline date {until} is more than 90 days ahead", "README.md")]
+    return True, [Problem("Gov §1", f"baseline period until {until}: missing artifacts are reported as warnings",
+                          "README.md", level="warning")]
+
+
 def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
     h = read_header(root)
     problems = check_header(root, h)
     if h.tier is None or h.tier == "T0" or not re.fullmatch(r"T[0-3]", h.tier):
         return problems
+    in_baseline, baseline_problems = baseline_state(h)
+    problems += baseline_problems
     problems += check_files(root, h)
     problems += check_budgets(root, h)
     problems += check_budget_loosening(root, base, event)
     problems += check_pins(root)
+    problems += check_lockfiles(root, h)
+    problems += check_pinned_sources(root)
+    problems += check_csp(root, h)
     if os.environ.get("POLICY_SKIP_BROWSERSLIST") != "1":
         problems += check_browserslist(root, h)
+    if in_baseline:
+        for p in problems:
+            if p.artifact:
+                p.level = "warning"
     return problems
 
 
@@ -413,32 +595,139 @@ def license_gate(report_path: Path) -> list[Problem]:
     return problems
 
 
-def report(problems: list[Problem], level: str = "error") -> None:
+def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Problem]:
+    """Section 5 secrets scan: a project's .gitleaks.toml must extend the default rules, and a PR that changes it says
+    why (the scan reads the config from the PR itself)."""
+    path = root / ".gitleaks.toml"
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    problems = []
+    extend = re.search(r"(?ms)^\s*\[extend\]\s*$(.*?)(?=^\s*\[|\Z)", text)
+    if not extend or not re.search(r"(?m)^\s*useDefault\s*=\s*true\b", extend.group(1)):
+        problems.append(Problem("Gov §5", "`.gitleaks.toml` does not extend the default rules, so it switches every one "
+                                          "of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml"))
+    if base:
+        old = subprocess.run(["git", "-C", str(root), "show", f"{base}:./.gitleaks.toml"], capture_output=True, text=True)
+        changed = old.returncode != 0 or old.stdout != text
+        body = ((event.get("pull_request") or {}).get("body") or "")
+        if changed and not re.search(r"(?im)^\s*Secrets config change:\s*\S", body):
+            problems.append(Problem("Gov §5", "this PR changes `.gitleaks.toml`, which the secrets scan of this same PR "
+                                              "uses. Add a `Secrets config change: <reason>` line to the PR description",
+                                    ".gitleaks.toml"))
+    return problems
+
+
+SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+JS_TYPES = {"", "text/javascript", "application/javascript", "module", "text/ecmascript", "application/ecmascript"}
+
+
+def extract_inline(root: Path, out: Path) -> dict[str, str]:
+    """Copy the inline <script> blocks of each tracked HTML file to <out>/<path>.inline.js, with everything outside
+    them blanked and newlines kept, so that a finding's line number is the line in the HTML file. Returns
+    {copy path: original relative path}."""
+    mapping = {}
+    for f in tracked_files(root):
+        if f.suffix.lower() not in (".html", ".htm"):
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        keep = [False] * len(text)
+        any_block = False
+        for m in SCRIPT_RE.finditer(text):
+            attrs = m.group(1)
+            if re.search(r"(?i)\bsrc\s*=", attrs):
+                continue
+            t = re.search(r"(?i)\btype\s*=\s*[\"']?([^\"'\s>]+)", attrs)
+            if (t.group(1).lower() if t else "") not in JS_TYPES:
+                continue
+            any_block = True
+            for i in range(m.start(2), m.end(2)):
+                keep[i] = True
+        if not any_block:
+            continue
+        blanked = "".join(c if keep[i] or c == "\n" else " " for i, c in enumerate(text))
+        rel = str(f.relative_to(root))
+        dest = out / (rel + ".inline.js")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(blanked, encoding="utf-8")
+        mapping[str(dest)] = rel
+    return mapping
+
+
+def sast_gate(reports: list[Path], mapping: dict[str, str] | None = None) -> list[Problem]:
+    """Section 5 static analysis and WEB-9/WEB-10. The policy's own ERROR rules block. A registry ERROR result blocks
+    unless the rule rates itself low-confidence or an audit rule (a lead for a reviewer, not a defect); everything
+    else is a warning."""
+    mapping = {os.path.realpath(k): v for k, v in (mapping or {}).items()}
+    problems, seen = [], set()
+    for path in reports:
+        if not path.is_file():
+            continue
+        for r in json.loads(path.read_text(encoding="utf-8")).get("results", []):
+            extra = r.get("extra", {})
+            meta = extra.get("metadata", {}) or {}
+            file = r.get("path", "")
+            file = mapping.get(os.path.realpath(file), file)
+            line = (r.get("start") or {}).get("line")
+            rule_id = r.get("check_id", "").split(".")[-1]
+            key = (file, line, rule_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            severity = str(extra.get("severity", "")).upper()
+            confidence = str(meta.get("confidence", "")).upper()
+            subcategory = [str(x).lower() for x in (meta.get("subcategory") or [])]
+            policy_rule = meta.get("policy-rule")
+            if policy_rule:
+                level = "error" if severity == "ERROR" else "warning"
+            else:
+                level = "error" if severity == "ERROR" and confidence != "LOW" and "audit" not in subcategory else "warning"
+            message = " ".join(str(extra.get("message", "")).split())
+            if policy_rule and message.startswith(f"{policy_rule}:"):
+                message = message[len(policy_rule) + 1:].strip()
+            label = policy_rule or f"Gov §5 ({rule_id})"
+            problems.append(Problem(label, message if policy_rule else f"{message} [{rule_id}]", file, line, level=level))
+    return problems
+
+
+def report(problems: list[Problem], level: str | None = None, title: str = "Policy conformance") -> int:
+    """Print problems (as GitHub annotations in Actions) and return the number of errors.
+
+    `level` overrides every problem's own level."""
     in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    errors = 0
     for p in problems:
+        lv = level or p.level
+        errors += lv == "error"
         if in_actions:
             loc = ",".join(x for x in (f"file={p.file}" if p.file else "", f"line={p.line}" if p.line else "") if x)
-            print(f"::{level} {loc}::{p.rule}: {p.message}" if loc else f"::{level} ::{p.rule}: {p.message}")
+            print(f"::{lv} {loc}::{p.rule}: {p.message}" if loc else f"::{lv} ::{p.rule}: {p.message}")
         else:
             where = f"{p.file}:{p.line}: " if p.file and p.line else f"{p.file}: " if p.file else ""
-            print(f"{where}{p.rule}: {p.message}")
+            print(f"{where}{'warning: ' if lv == 'warning' else ''}{p.rule}: {p.message}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary and level == "error":
+    if summary:
         with open(summary, "a", encoding="utf-8") as f:
-            f.write("## Policy conformance\n\n")
+            f.write(f"## {title}\n\n")
             if problems:
-                f.write("| Rule | Problem | Where |\n| --- | --- | --- |\n")
+                f.write("| | Rule | Problem | Where |\n| --- | --- | --- | --- |\n")
                 for p in problems:
                     where = f"`{p.file}:{p.line}`" if p.file and p.line else f"`{p.file}`" if p.file else ""
-                    f.write(f"| {p.rule} | {p.message.replace('|', '/')} | {where} |\n")
+                    mark = "error" if (level or p.level) == "error" else "warning"
+                    f.write(f"| {mark} | {p.rule} | {p.message.replace('|', '/')} | {where} |\n")
             else:
                 f.write("All checked rules pass.\n")
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["conformance", "tier", "header", "vulns", "licenses", "pins"])
-    ap.add_argument("--report", type=Path, help="osv-scanner JSON report, for `vulns`")
+    ap.add_argument("command", choices=["conformance", "tier", "header", "vulns", "licenses", "pins",
+                                        "secrets-config", "extract-inline", "sast"])
+    ap.add_argument("--report", type=Path, action="append", default=[],
+                    help="a JSON report: osv-scanner for `vulns`/`licenses`, Semgrep for `sast` (repeatable)")
+    ap.add_argument("--out", type=Path, help="output directory, for `extract-inline`")
+    ap.add_argument("--map", type=Path, help="inline-script map written by `extract-inline`, for `sast`")
     ap.add_argument("--root", default=".", type=Path)
     ap.add_argument("--base", help="git ref of the PR base, to detect loosened budgets")
     ap.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"),
@@ -455,28 +744,46 @@ def main(argv: list[str] | None = None) -> int:
                           "users": h.users, "lighter_t2": h.lighter_t2}))
         return 0
 
-    if args.command == "pins":
-        problems = check_pins(root)
-        report(problems)
-        return 1 if problems else 0
-    if args.command == "licenses":
-        problems = license_gate(args.report)
-        report(problems)
-        return 1 if problems else 0
-    if args.command == "vulns":
-        h = read_header(root)
-        blocking, warnings = vuln_gate(args.report, "T1" if h.lighter_t2 else h.tier)
-        report(warnings, level="warning")
-        report(blocking)
-        print(f"{len(blocking)} blocking, {len(warnings)} warning")
-        return 1 if blocking else 0
-
     event = {}
     if args.event and Path(args.event).is_file():
         event = json.loads(Path(args.event).read_text(encoding="utf-8"))
-    problems = conformance(root, args.base, event)
-    report(problems)
-    return 1 if problems else 0
+    if args.command == "secrets-config":
+        return 1 if report(check_gitleaks_config(root, args.base, event), title="Secrets scan configuration") else 0
+    if args.command == "extract-inline":
+        mapping = extract_inline(root, args.out.resolve())
+        (args.out / "inline-map.json").write_text(json.dumps(mapping), encoding="utf-8")
+        print(f"{len(mapping)} HTML file(s) with inline scripts")
+        return 0
+    if args.command == "sast":
+        mapping = json.loads(args.map.read_text(encoding="utf-8")) if args.map and args.map.is_file() else {}
+        problems = sast_gate(args.report, mapping)
+        errors = report(problems, title="Static analysis")
+        print(f"{errors} blocking, {len(problems) - errors} warning")
+        return 1 if errors else 0
+    if args.command == "pins":
+        return 1 if report(check_pins(root), title="DEP-7 pins") else 0
+    if args.command == "licenses":
+        return 1 if report(license_gate(args.report[0]), title="Licenses") else 0
+    if args.command == "vulns":
+        h = read_header(root)
+        blocking, warnings = vuln_gate(args.report[0], "T1" if h.lighter_t2 else h.tier)
+        for w in warnings:
+            w.level = "warning"
+        data = json.loads(args.report[0].read_text(encoding="utf-8")) if args.report[0].is_file() else {}
+        scanned = sum(len(r.get("packages", [])) for r in data.get("results", []))
+        if scanned == 0:
+            warnings.append(Problem("Gov §5", "the scan matched no packages at all, so a pass here says nothing. Check "
+                                              "that every manifest has a lockfile, and list fetched sources in "
+                                              "pinned-sources.cdx.json (DEP-8)", level="warning"))
+        if (root / "pinned-sources.cdx.json").is_file():
+            warnings.append(Problem("DEP-8", "OSV matches few C and C++ sources; check the advisories of every source in "
+                                             "pinned-sources.cdx.json by hand at each release audit",
+                                    "pinned-sources.cdx.json", level="warning"))
+        errors = report(warnings + blocking, title="Known-vulnerable dependencies")
+        print(f"{errors} blocking, {len(warnings)} warning, {scanned} package(s) scanned")
+        return 1 if errors else 0
+
+    return 1 if report(conformance(root, args.base, event)) else 0
 
 
 if __name__ == "__main__":

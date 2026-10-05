@@ -59,13 +59,30 @@ rules:
     languages: [javascript, typescript]
     severity: ERROR
     message: >-
-      WEB-10: a URL built at run time is used as a link, script, form or navigation target. Route it through the
-      project's URL validation helper, which allows only http, https and mailto.
+      WEB-10: a URL built at run time is used as a link, form or navigation target, or as the source of an element
+      that can run code. Route it through the project's URL validation helper, which rejects javascript: and other
+      schemes the project does not allow.
     metadata: { policy-rule: WEB-10 }
     patterns:
       - pattern-either:
           - pattern: $EL.href = $V
-          - pattern: $EL.src = $V
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      $EL = document.createElement("$TAG");
+                      ...
+                  - pattern-inside: |
+                      const $EL = document.createElement("$TAG");
+                      ...
+                  - pattern-inside: |
+                      let $EL = document.createElement("$TAG");
+                      ...
+              - metavariable-regex:
+                  metavariable: $TAG
+                  regex: (?i)^(script|iframe|frame|embed)$
+              - pattern-either:
+                  - pattern: $EL.src = $V
+                  - pattern: $EL.setAttribute("src", $V)
           - pattern: $EL.action = $V
           - pattern: $EL.formAction = $V
           - pattern: location.href = $V
@@ -82,7 +99,6 @@ rules:
           - pattern: document.location.replace($V)
           - pattern: window.open($V, ...)
           - pattern: $EL.setAttribute("href", $V)
-          - pattern: $EL.setAttribute("src", $V)
           - pattern: $EL.setAttribute("action", $V)
           - pattern: $EL.setAttribute("formaction", $V)
       - pattern-not: $X = "..."
@@ -93,6 +109,9 @@ rules:
       - pattern-not: $EL.$P = $U.safeUrl(...)
       - pattern-not: $L.$M($U.safeUrl(...), ...)
       - pattern-not: $EL.setAttribute($A, $U.safeUrl(...))
+      # URLs the page makes itself from its own data are not external data (WEB-10).
+      - pattern-not: $X = URL.createObjectURL(...)
+      - pattern-not: $X = $C.toDataURL(...)
 
   - id: web-10-javascript-url-literal
     languages: [javascript, typescript]
@@ -103,3 +122,14 @@ rules:
     paths:
       exclude: ["*.test.*", "*.spec.*", "**/test/**", "**/tests/**", "**/__tests__/**"]
     pattern-regex: '(?i)["`'']\s*javascript:'
+
+  - id: web-7-inline-event-handler
+    languages: [generic]
+    paths:
+      include: ["*.html", "*.htm"]
+    severity: WARNING
+    message: >-
+      WEB-7: an inline event handler attribute. It only runs under a CSP that allows 'unsafe-inline' (or
+      'unsafe-hashes') for scripts, which WEB-7 forbids. Attach the handler with addEventListener.
+    metadata: { policy-rule: WEB-7 }
+    pattern-regex: (?i)<[a-z][^>]*\son[a-z]+\s*=\s*["'][^"']

@@ -33,6 +33,8 @@ To adopt it in a project:
 - [ ] Create `docs/threat-model.md` (tier 2 and up) and a findings register (an issue label is enough).
 - [ ] Existing project: complete the baseline review and audit (Section 7) before its next release under this policy.
 
+An existing project may adopt the policy before every artifact exists. Its README then also states `Baseline: until <date>`, at most 90 days ahead. Until that date, a missing artifact (threat model, capability matrix, `budgets.json`, license allowlist, dependency records) is reported as a warning instead of failing CI; every other check blocks as usual, and the dates count as a finding's deadline (Section 8). The baseline audit must be complete by that date. After it, the line is removed and missing artifacts fail CI again. A new project gets no baseline period.
+
 Any conflict between this policy and a project's own rules is resolved in favor of the stricter rule.
 
 ## 2. Definitions
@@ -102,8 +104,9 @@ Anything a tool can check is checked on every commit, not saved for an audit. A 
 
 Rules for the checks themselves:
 
-- Dependencies are pinned by lockfile; updates arrive as their own reviewed changes.
+- Dependencies are pinned by lockfile; updates arrive as their own reviewed changes. Third-party code that no lockfile can express (source tarballs, git commits, vendored copies) is pinned and listed as [`DEP-8`](../standards/dependencies.md#dep-8) requires.
 - A suppressed finding needs an inline comment with the reason and a link to its Section 10 exception.
+- A result that a review has confirmed is not a defect at all (a false positive, not an accepted risk) needs no exception. It is marked where it occurs with `policy-fp: <reason> (<link to the review or PR that confirmed it>)`, in the tool's own suppression syntax (for example `// nosemgrep: <rule-id> -- policy-fp: ...`, or a commented allowlist entry). Each audit lists every `policy-fp` marker and re-checks a sample of them.
 - The license policy (allowed, review-needed, disallowed) is written in the repo, not kept in someone's head.
 - A standard in [`standards/`](../standards/) may require a check at a lower tier than this table does (for example a static-analysis rule for HTML sinks at T1). The standard's check applies at its rule's tier.
 - Coverage is never a target, because tests that run lines without asserting anything satisfy it. The real control is the review rule that new behavior has a test that fails if the change is reverted (Section 6).
@@ -229,6 +232,7 @@ A solo developer cannot be independent of their own code, so the policy substitu
 | Requirement | Solo substitute |
 | --- | --- |
 | Independent code review | Open a pull request anyway. Review your own diff after at least a night's break, against the Section 6 checklist, then run a fresh-context AI review (below). |
+| Two reviewers, or reviewer + fresh-context pass (T3, Section 3) | The self-review and the fresh-context AI review above. For a change that touches a trust boundary (Section 4), the AI review runs both passes, blind and adversarial, before merge. The human outside reviewer that tier 3 needs for the first public release (Independent audit, below) is not replaced. |
 | Independent audit | A fresh-context AI audit given the standard and the code, plus your own pass with the checklist. For tier 3, get a human outside reviewer for at least the first public release. |
 | Verifier other than the fixer | A fresh-context AI review of the fix against the finding, plus the regression test. |
 | Risk accepted by someone other than the author | Write the exception and wait 24 hours before accepting it. |

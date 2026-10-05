@@ -175,7 +175,7 @@
         "properties": {
           "measuredOn": {
             "type": "string",
-            "description": "The clean machine, device or CI runner the numbers are measured on."
+            "description": "The clean machine, real device or CI runner the numbers are measured on. For release-test, the device model."
           },
           "startupMs": {
             "type": "number",
@@ -199,6 +199,14 @@
             "type": "integer",
             "minimum": 1,
             "description": "Number of runs per CI job; the median is compared."
+          },
+          "measuredWhere": {
+            "enum": [
+              "ci",
+              "release-test"
+            ],
+            "default": "ci",
+            "description": "ci (default): startup and memory measured in CI. release-test: measured before each release on the real device named in measuredOn (NAT-7). Installed size is always measured in CI."
           }
         }
       }

@@ -1,7 +1,8 @@
 # Policy checks for a project. Copy to .github/workflows/policy.yml.
 #
-# Replace every POLICY_SHA with the full commit SHA of the policy release you follow (the one your README's
-# "Policy: vX.Y" names), e.g.:  sed -i "s/POLICY_SHA/$(git ls-remote https://github.com/5wHN28Dg/policy refs/tags/v1.1^{} | cut -f1)/" .github/workflows/policy.yml
+# Pin the policy actions to the full commit SHA of the release your README's "Policy: vX.Y" names, e.g. for v1.2:
+#   sha=$(git ls-remote https://github.com/5wHN28Dg/policy 'refs/tags/v1.2^{}' | cut -f1)
+#   sed -i "s/@POLICY_SHA /@$sha /" .github/workflows/policy.yml
 # Pinning by SHA is DEP-7. Make the jobs below required in branch protection (Section 5), except claude-review,
 # which is advisory.
 #

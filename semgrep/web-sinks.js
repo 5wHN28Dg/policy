@@ -18,6 +18,12 @@ el.textContent = userInput;
 // ruleid: web-10-dynamic-url-sink
 a.href = params.get("next");
 // ok: web-10-dynamic-url-sink
+img.src = params.get("pic");
+// ok: web-10-dynamic-url-sink
+a.href = URL.createObjectURL(new Blob([data]));
+// ok: web-10-dynamic-url-sink
+img.src = canvas.toDataURL("image/png");
+// ok: web-10-dynamic-url-sink
 a.href = "/home";
 // ok: web-10-dynamic-url-sink
 a.href = urls.safeUrl(params.get("next"));
@@ -52,3 +58,15 @@ btn.setAttribute("formaction", next);
 frame.setAttribute("srcdoc", page);
 // ok: web-9-html-sink-assignment
 frame.setAttribute("srcdoc", "<p>static</p>");
+
+function loadScript(u) {
+  const s = document.createElement("script");
+  // ruleid: web-10-dynamic-url-sink
+  s.src = u;
+  const f = document.createElement("iframe");
+  // ruleid: web-10-dynamic-url-sink
+  f.setAttribute("src", u);
+  const im = document.createElement("img");
+  // ok: web-10-dynamic-url-sink
+  im.src = u;
+}

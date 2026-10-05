@@ -37,7 +37,23 @@ runs:
         WEB: ${{ steps.plan.outputs.web }}
         FULL: ${{ steps.plan.outputs.full }}
       run: |
+        tools="${{ github.action_path }}/../../tools"
+        rules="${{ github.action_path }}/../../semgrep/web-sinks.yml"
+        out="$RUNNER_TEMP/policy-sast"
+        rm -rf "$out" && mkdir -p "$out/inline"
         configs=()
-        [[ $WEB == true ]] && configs+=(--config "${{ github.action_path }}/../../semgrep/web-sinks.yml")
+        [[ $WEB == true ]] && configs+=(--config "$rules")
         [[ $FULL == true ]] && configs+=(--config p/default)
-        semgrep scan --metrics off --severity ERROR --error --exclude "*.min.js" "${configs[@]}" .
+        # Exit 0 or 1 is a completed scan; the gate below decides what blocks (Section 5, WEB-9, WEB-10).
+        semgrep scan --metrics off --json --output "$out/repo.json" --exclude "*.min.js" "${configs[@]}" . || [[ $? -eq 1 ]]
+        reports=(--report "$out/repo.json")
+        if [[ $WEB == true ]]; then
+          # Inline <script> blocks: Semgrep doesn't parse JavaScript inside HTML, so scan extracted copies.
+          python3 "$tools/policy_check.py" extract-inline --root . --out "$out/inline"
+          mapfile -t copies < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' "$out/inline/inline-map.json")
+          if [[ ${#copies[@]} -gt 0 ]]; then
+            semgrep scan --metrics off --json --output "$out/inline.json" --config "$rules" "${copies[@]}" || [[ $? -eq 1 ]]
+            reports+=(--report "$out/inline.json")
+          fi
+        fi
+        python3 "$tools/policy_check.py" sast "${reports[@]}" --map "$out/inline/inline-map.json"

@@ -1,7 +1,7 @@
 # Fixture: a compliant T2 native project
 
 Tier: T2
-Policy: v1.1
+Policy: v1.2
 Type: native
 
 ## About

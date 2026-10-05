@@ -19,6 +19,11 @@ runs:
     - shell: bash
       run: python -m pip install --quiet --disable-pip-version-check --require-hashes -r "${{ github.action_path }}/../../tools/requirements.txt"
     - shell: bash
+      run: |
+        # The WEB-1 check's browserslist, pinned by the policy's lockfile (npm ci verifies each package's integrity).
+        npm ci --silent --ignore-scripts --no-audit --no-fund --prefix "${{ github.action_path }}/../../tools/browserslist"
+        echo "BROWSERSLIST_BIN=$(cd "${{ github.action_path }}/../../tools/browserslist" && pwd)/node_modules/.bin/browserslist" >> "$GITHUB_ENV"
+    - shell: bash
       env:
         PROJECT_DIR: ${{ inputs.working-directory }}
         BASE_REF: ${{ inputs.base-ref || (github.base_ref && format('origin/{0}', github.base_ref)) || '' }}
