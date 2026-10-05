@@ -235,7 +235,7 @@ Until the expiry, CI reports a failure the entry covers as a warning that names 
 - the expiry is at most 90 days after acceptance;
 - an entry whose acceptance date is less than a day after its writing date gets a warning (Section 11's wait, which applies to solo developers);
 - a PR that adds or changes an entry names it in an `Exception change: <id>` line in its description;
-- a renewal raises the count by one, and a lapsed exception is renewed under its own id, not re-added under a new one with the same rule and overlapping files.
+- a renewal raises the count by one, and a lapsed exception is renewed under its own id, not replaced by a new entry for the same rule in the PR that removes it.
 
 An entry never covers a Critical finding, a secret (a gitleaks allow marker can't rest on an exception), or the policy's own controls: suppression markers, the secrets-scan configuration, the baseline period, loosened budgets, and this file. A line-level `exception:` link counts only in a file its entry covers.
 
