@@ -94,7 +94,7 @@ Anything a tool can check is checked on every commit, not saved for an audit. A 
 | Secrets in code and history | gitleaks, trufflehog | Blocking | Blocking |
 | Build, lint, formatting | Language defaults | Blocking | Blocking |
 | Unit and integration tests | Language defaults | Blocking | Blocking |
-| Known-vulnerable dependencies | osv-scanner, Dependabot, pip-audit, npm audit | Warning | Blocking on High and Critical |
+| Known-vulnerable dependencies | osv-scanner, Dependabot, pip-audit, npm audit | Warning | Blocking on High and Critical; on T3, blocking on every severity |
 | Static security analysis | Semgrep, CodeQL | Not required | Blocking on High and Critical |
 | License compliance | ScanCode, REUSE lint, license-checker | Not required | Blocking on disallowed licenses |
 | Software bill of materials | Syft, CycloneDX | Not required | Generated for every release |

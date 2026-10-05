@@ -341,6 +341,10 @@ class VulnGateTests(unittest.TestCase):
         self.assertEqual([b.message.split()[2] for b in blocking], ["a", "c"])
         self.assertEqual(len(warnings), 1)
 
+    def test_t3_blocks_every_severity(self):
+        blocking, warnings = self.gate("T3")
+        self.assertEqual((len(blocking), len(warnings)), (3, 0))
+
     def test_database_severity_fallback(self):
         report = {"results": [{"source": {"path": "/x/go.sum"}, "packages": [
             {"package": {"name": "h", "version": "1"}, "groups": [{"ids": ["GO-1"], "max_severity": ""}],

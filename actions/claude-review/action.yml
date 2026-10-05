@@ -132,7 +132,8 @@ runs:
         marker='<!-- policy-claude-review -->'
         body="$marker"$'\n'"$(cat "$summary")"
         # The default token can't read /user; it posts as github-actions[bot]. A PAT or App token posts as its owner.
-        login=$(gh api user -q .login 2>/dev/null || echo "github-actions[bot]")
+        login=$(gh api user --jq .login 2>/dev/null) || login="github-actions[bot]"
+        [[ $login =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || login="github-actions[bot]"
         id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
                -q ".[] | select(.user.login == \"$login\" and (.body | startswith(\"$marker\"))) | .id" | tail -1)
         if [[ -n $id ]]; then

@@ -50,7 +50,7 @@ The policy ships the CI that checks it. A project copies [templates/ci/policy.ym
 | --- | --- | --- |
 | [conformance](actions/conformance/action.yml) | README header; required files per tier; `budgets.json` against the schema; loosened budgets without a `Budget change:` line in the PR; `DEP-7` pins; the `WEB-1` resolved browser list | Yes |
 | [secrets](actions/secrets/action.yml) | Section 5 secrets in code and history (gitleaks) | Yes, every tier |
-| [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`) | High and Critical from T2; warnings on T1 |
+| [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`) | Every severity on T3; High and Critical on T2; warnings on T1 |
 | [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1; Semgrep's default ruleset from full T2 | Yes |
 | [sbom](actions/sbom/action.yml) | Section 5 SBOM (Syft, CycloneDX) on release tags | No; uploads an artifact |
 | [claude-review](actions/claude-review/action.yml) | A fresh-context Claude review of each PR against Section 6 and the standards, with inline comments and one summary comment | No; advisory |

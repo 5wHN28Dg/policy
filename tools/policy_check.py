@@ -13,7 +13,7 @@ Usage:
 Actions, and exits 1 if any rule fails. `tier` prints the declared tier
 (T0-T3). `header` prints the parsed README header as JSON. `vulns` applies the
 Section 5 gate to an osv-scanner JSON report: warnings on T1, failure on High
-or Critical (CVSS 7.0 and up) from T2. `licenses` fails on license violations in an
+or Critical (CVSS 7.0 and up) on T2, failure on any severity on T3. `licenses` fails on license violations in an
 osv-scanner report made with --licenses. `pins` runs only the DEP-7 check.
 
 Each problem names the rule it comes from, so a finding can cite it.
@@ -389,7 +389,8 @@ def vuln_gate(report_path: Path, tier: str | None) -> tuple[list[Problem], list[
                     high = bool(levels & {"HIGH", "CRITICAL"}) or not levels
                     shown = f"severity {', '.join(sorted(levels)) or 'unknown'}"
                 p = Problem("Gov §5", f"known-vulnerable dependency {info.get('name')} {info.get('version')}: {ids} ({shown})", rel)
-                if n >= 2 and high:
+                # Section 5: High and Critical block from T2; on T3 every known vulnerability blocks.
+                if n >= 3 or (n >= 2 and high):
                     blocking.append(p)
                 else:
                     warnings.append(p)

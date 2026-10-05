@@ -1,7 +1,8 @@
 name: Policy dependency scan
 description: >-
   Section 5, known-vulnerable dependencies and license compliance, with osv-scanner. T1: vulnerabilities are
-  warnings. T2 and up: High and Critical block, and every package's license must be in license-allowlist.txt.
+  warnings. T2: High and Critical block. T3: every known vulnerability blocks. From T2, every package's license
+  must be in license-allowlist.txt.
 inputs:
   working-directory:
     description: The project root, relative to the workspace (for monorepos and tests).
