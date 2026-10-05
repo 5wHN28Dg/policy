@@ -46,6 +46,14 @@ def commit_backdated(root: Path, days: int = 3, message: str = "x") -> None:
     subprocess.run(["git", "-C", str(root), "commit", "-qm", message, "--allow-empty"], check=True, env=env)
 
 
+def csp_rules(files, tier="T2"):
+    """The rules check_csp reports for a web project made of `files`."""
+    with tempfile.TemporaryDirectory() as d:
+        for rel, text in files.items():
+            write(Path(d), rel, text)
+        return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier=tier, types=["web"]))]
+
+
 def rules(problems):
     return sorted({p.rule for p in problems})
 
@@ -684,7 +692,8 @@ class ReviewFixTests(unittest.TestCase):
                     write(Path(d), rel, text)
                 return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
         self.assertEqual(check({"docs/threat-model.md": "- CSP: set by the Cloudflare _headers of the host\n"}), [])
-        self.assertEqual(check({"a.js": "const h = 'Content-Security-Policy';\n// never use script-src 'unsafe-inline'\n"}), [])
+        # the comment is neither a WEB-7 finding nor a CSP: the file names the header but sets no directive
+        self.assertEqual(check({"a.js": "const h = 'Content-Security-Policy';\n// never use script-src 'unsafe-inline'\n"}), ["WEB-8"])
         self.assertEqual(check({"a.js": "csp = ['Content-Security-Policy',\n \"default-src 'self' 'unsafe-inline'\",\n \"script-src 'self'\"]\n"}), [])
         self.assertEqual(check({"s.js": "helmet({ contentSecurityPolicy: { directives: { scriptSrc: [\"'self'\", \"'unsafe-eval'\"] } } })\n"}), ["WEB-7"])
         self.assertEqual(check({"a.js": "// mentions script-src only\n"}), ["WEB-8"])
@@ -738,7 +747,7 @@ class ReReviewTests(unittest.TestCase):
     def test_csp_other_directives_on_the_same_line(self):
         def rules(text):
             with tempfile.TemporaryDirectory() as d:
-                write(Path(d), "a.js", "// Content-Security-Policy\n" + text)
+                write(Path(d), "a.js", "const HEADER = 'Content-Security-Policy';\n" + text)
                 return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
         self.assertEqual(rules('const csp = ["script-src \'self\'", "style-src \'unsafe-inline\'"].join("; ");\n'), [])
         self.assertEqual(rules('helmet({contentSecurityPolicy: {directives: {scriptSrc: ["\'self\'"], styleSrc: ["\'unsafe-inline\'"]}}});\n'), [])
@@ -1010,3 +1019,97 @@ class CommandWiringTests(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout)  # GHSA-3 is Critical: no exception covers it
             self.assertIn("excepted by EX-1", r.stdout)
             self.assertIn("1 blocking", r.stdout)
+
+
+class TrialTwoTests(unittest.TestCase):
+    """Fixes from the kks-explorer v2.1 notes (4.2, 4.4, 3.4)."""
+
+    def csp_rules(self, files):
+        return csp_rules(files)
+
+    def test_prose_about_a_missing_csp_is_not_a_csp(self):
+        # 4.4: the exception describing the missing CSP made the check pass
+        self.assertEqual(self.csp_rules({"policy-exceptions.json": '{"finding": "served with no Content-Security-Policy"}'}), ["WEB-8"])
+        self.assertEqual(self.csp_rules({"server/notes.py": "# TODO: send a Content-Security-Policy header\n"}), ["WEB-8"])
+
+    def test_a_marker_with_a_directive_nearby_counts(self):
+        self.assertEqual(self.csp_rules({"server/app.py": "HEADERS = {\n  'Content-Security-Policy':\n    \"default-src 'self'; \"\n    \"script-src 'self'\",\n}\n"}), [])
+        self.assertEqual(self.csp_rules({"tauri.conf.json": '{"app": {"security": {"csp": "default-src \'self\'"}}}'}), [])
+
+    def test_missing_browser_declaration_is_a_baseline_artifact(self):
+        # 4.2: WEB-2 failed during the baseline period although .browserslistrc is a declaration file
+        with tempfile.TemporaryDirectory() as d:
+            problems = pc.check_browserslist(Path(d), pc.Header(tier="T1", types=["web"]))
+        self.assertEqual([(p.rule, p.file, p.artifact) for p in problems], [("WEB-2", ".browserslistrc", True)])
+
+    def test_baseline_turns_missing_browserslist_into_a_warning(self):
+        from unittest import mock
+        until = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        with mock.patch.dict(os.environ, {"BROWSERSLIST_BIN": "/bin/false"}), tempfile.TemporaryDirectory() as d:
+            os.environ.pop("POLICY_SKIP_BROWSERSLIST", None)
+            root = Path(d)
+            compliant_project(root, tier="T1", types="web")
+            write(root, "README.md", f"Tier: T1\nPolicy: v2.2\nType: web\nBaseline: until {until}\n")
+            problems = pc.conformance(root, None, {})  # no .browserslistrc, so browserslist is never run
+        web2 = [p for p in problems if p.rule == "WEB-2"]
+        self.assertEqual([p.level for p in web2], ["warning"])
+
+
+class CspReviewTests(unittest.TestCase):
+    """The PR #4 review: a CSP built in code, comments, and the matrix under a baseline."""
+    def rules(self, files):
+        return csp_rules(files)
+
+    def test_far_apart_csp_still_gets_web_7(self):
+        js = ("const csp = [\n  \"default-src 'self'\",\n  \"script-src 'self' 'unsafe-inline'\",\n  \"object-src 'none'\",\n].join('; ');\n"
+              + "\n" * 7 + "res.setHeader('Content-Security-Policy', csp);\n")
+        self.assertEqual(self.rules({"server.js": js}), ["WEB-7"])
+
+    def test_far_apart_csp_counts_as_found(self):
+        js = ("const directives = {\n  defaultSrc: [\"'self'\"],\n  objectSrc: [\"'none'\"],\n};\n" + "\n" * 9
+              + "app.use(helmet({ contentSecurityPolicy: { directives } }));\n")
+        self.assertEqual(self.rules({"app.js": js}), [])
+        headers = "/*\n  Content-Security-Policy: base-uri 'none';\n" + "    object-src 'none';\n" * 7 + "    script-src 'self'\n"
+        self.assertEqual(self.rules({"_headers": headers}), [])
+
+    def test_comments_are_not_a_csp(self):
+        self.assertEqual(self.rules({"a.py": "# TODO: send Content-Security-Policy: default-src 'self'\n"}), ["WEB-8"])
+        self.assertEqual(self.rules({"a.js": "/**\n * Content-Security-Policy, e.g.\n * default-src 'self'\n */\n"}), ["WEB-8"])
+
+    def test_missing_matrix_under_baseline_is_only_the_artifact_warning(self):
+        from unittest import mock
+        until = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            compliant_project(root, tier="T1", types="web")
+            (root / "docs" / "capability-matrix.md").unlink()
+            write(root, ".browserslistrc", "defaults\n")
+            write(root, "bin/bl", "#!/bin/sh\necho chrome 140\n")
+            (root / "bin" / "bl").chmod(0o755)
+            write(root, "README.md", f"Tier: T1\nPolicy: v2.2\nType: web\nBaseline: until {until}\n")
+            with mock.patch.dict(os.environ, {"BROWSERSLIST_BIN": str(root / "bin" / "bl")}):
+                os.environ.pop("POLICY_SKIP_BROWSERSLIST", None)
+                problems = pc.conformance(root, None, {})
+        self.assertEqual([(p.rule, p.level) for p in problems if p.rule.startswith("WEB-1")], [("WEB-1", "warning")])
+
+
+class CspDirectiveNameTests(unittest.TestCase):
+    """A file that names the header and merely contains a -src token is not a CSP (PR #4 re-review)."""
+
+    def test_not_a_csp(self):
+        cases = {
+            "removeHeader": "res.removeHeader('Content-Security-Policy');\nconst avatarSrc = user.avatar;\n",
+            "getHeader": "if (!res.getHeader('Content-Security-Policy')) warn();\nconst imgSrc = pick();\n",
+            "empty meta": '<meta http-equiv="Content-Security-Policy" content="">\n<img data-src="a.png">\n',
+            "electron sandbox": "const H = 'Content-Security-Policy';\nnew BrowserWindow({ webPreferences: { sandbox: true } });\n",
+            "iframe sandbox": '<meta name="note" content="Content-Security-Policy">\n<iframe sandbox src="x.html"></iframe>\n',
+        }
+        for name, text in cases.items():
+            ext = "html" if "<" in text else "js"
+            self.assertEqual(csp_rules({f"a.{ext}": text}), ["WEB-8"], name)
+
+    def test_real_directives_still_count(self):
+        self.assertEqual(csp_rules({"a.js": "helmet({contentSecurityPolicy: {directives: {defaultSrc: [\"'self'\"]}}});\n"}), [])
+        self.assertEqual(csp_rules({"a.js": "const d = {\"frame-ancestors\": [\"'none'\"]};\nhdr('Content-Security-Policy', d);\n"}), [])
+        self.assertEqual(csp_rules({"a.html": "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'self'\">\n"}), [])
+        self.assertEqual(csp_rules({"_headers": "Content-Security-Policy: Default-Src 'self'\n"}), [])  # names are case-insensitive

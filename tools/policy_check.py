@@ -331,7 +331,8 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
     has_config = (root / ".browserslistrc").is_file() or (
         pkg.is_file() and "browserslist" in json.loads(pkg.read_text(encoding="utf-8") or "{}"))
     if not has_config:
-        return [Problem("WEB-2", "no browserslist declaration (.browserslistrc or the `browserslist` key in package.json)")]
+        return [Problem("WEB-2", "no browserslist declaration (.browserslistrc or the `browserslist` key in package.json)",
+                        ".browserslistrc", artifact=True)]
     # In CI, the conformance action installs the policy's lockfile-pinned browserslist and sets BROWSERSLIST_BIN.
     # Locally, fall back to npx with the same version (not integrity-checked).
     binary = os.environ.get("BROWSERSLIST_BIN")
@@ -341,6 +342,8 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
     except (OSError, subprocess.SubprocessError) as e:
         return [Problem("WEB-1", f"could not resolve the browser list with npx browserslist: {e}")]
     resolved = {l.strip() for l in out.splitlines() if l.strip()}
+    if not (root / "docs" / "capability-matrix.md").is_file():
+        return []  # the missing matrix is reported once, as an artifact (check_files)
     recorded = recorded_browsers(root / "docs" / "capability-matrix.md")
     if recorded is None:
         return [Problem("WEB-1", "the capability matrix has no resolved browser list (a fenced block after the "
@@ -517,6 +520,16 @@ CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
                   ".json", ".json5", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
 DIRECTIVE_RE = re.compile(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b")
 NEXT_DIRECTIVE_RE = re.compile(r"\b[a-z]+-src(?:-elem|-attr)?\b|\b[a-z]+Src(?:Elem|Attr)?\b")
+# The CSP directives (W3C CSP Level 3), kebab-case as in a header or meta tag, and camelCase only as an object key,
+# as configuration libraries write them (helmet's `scriptSrc: [...]`). A bare `-src`/`Src` token (an `<img data-src>`,
+# a variable named imgSrc) or `sandbox` (an iframe attribute, Electron's webPreferences) is not evidence of a CSP.
+CSP_DIRECTIVE_NAMES = ["default-src", "script-src", "script-src-elem", "script-src-attr", "style-src", "style-src-elem",
+                       "style-src-attr", "img-src", "font-src", "connect-src", "media-src", "object-src", "frame-src",
+                       "child-src", "worker-src", "manifest-src", "base-uri", "form-action", "frame-ancestors",
+                       "upgrade-insecure-requests", "require-trusted-types-for", "trusted-types", "report-to", "report-uri"]
+_camel = [re.sub(r"-([a-z])", lambda m: m.group(1).upper(), d) for d in CSP_DIRECTIVE_NAMES]
+ANY_DIRECTIVE_RE = re.compile(r"(?<![\w-])(?i:" + "|".join(map(re.escape, CSP_DIRECTIVE_NAMES)) + r")(?![\w-])"
+                              r"|(?<![\w$])[\"']?(?:" + "|".join(_camel) + r")[\"']?\s*:")
 CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
 COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
 CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}
@@ -542,9 +555,13 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if not CSP_MARKER.search(text):
+        if rel == EXCEPTIONS_FILE or not CSP_MARKER.search(text):
             continue
-        found = True
+        # A file sets a CSP only if, outside comments, it names the header and has a directive somewhere: a CSP built
+        # in code keeps them apart, while prose about a missing CSP (or an exception describing one) has no directive.
+        code = [l for l in text.splitlines() if not COMMENT_LINE.match(l)]
+        if any(CSP_MARKER.search(l) for l in code) and any(ANY_DIRECTIVE_RE.search(l) for l in code):
+            found = True
         has_script_src = re.search(r"(?i)script-src|scriptSrc", text) is not None
         for i, line in enumerate(text.splitlines(), 1):
             if COMMENT_LINE.match(line):
@@ -560,9 +577,11 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
                 if bad and (not name.lower().startswith("default") or not has_script_src):
                     problems.append(Problem("WEB-7", f"a script directive allows {' and '.join(bad)}", rel, i))
     if not found and h.tier_num >= 2:
-        problems.append(Problem("WEB-8", "no Content-Security-Policy found in the repository (a meta tag, server code or "
-                                         "hosting config). If it is set outside the repository, add a line "
-                                         "`CSP: set by <where>` to docs/threat-model.md"))
+        problems.append(Problem("WEB-8", "no Content-Security-Policy found in the repository: no file names the header "
+                                         "and has a directive (a meta tag, server code or hosting config). If it is set "
+                                         "outside the repository, or assembled across files the check can't connect "
+                                         "(a template and its settings), add a line `CSP: set by <where>` to "
+                                         "docs/threat-model.md"))
     return problems
 
 

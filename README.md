@@ -30,7 +30,7 @@ Tiers: T0 projects follow only the governance rules for T0 (a secrets scan); the
 
    ```
    Tier: T2
-   Policy: v2.1
+   Policy: v2.2
    Type: web, native
    Users: none
    Baseline: until 2026-12-31
@@ -81,4 +81,4 @@ It audits a copy of the project's last commit, without its git history (commit m
 
 A change to this repo is reviewed like code. Rule IDs are stable: a removed rule's ID is not reused, and a reworded rule keeps its ID unless its meaning changes. A deliberate departure in one project is an exception under [Section 10](governance/review-audit.md#10-exceptions-and-risk-acceptance), not an edit here.
 
-**Versions.** Each release of this repo is a git tag (`v1.0`, `v2.0`, `v2.1`). A major version adds, tightens or removes a MUST; a minor version clarifies wording, or adds SHOULDs and template fields. Each project states the version it follows in its README, and each audit report records the version it applied. A new or tightened MUST takes effect for a project when it moves to that version, which is a reviewed change in the project. A breaking change to `templates/budgets.schema.json` also bumps its `schemaVersion`.
+**Versions.** Each release of this repo is a git tag (`v1.0`, `v2.1`, `v2.2`). A major version adds, tightens or removes a MUST; a minor version clarifies wording, or adds SHOULDs and template fields. Each project states the version it follows in its README, and each audit report records the version it applied. A new or tightened MUST takes effect for a project when it moves to that version, which is a reviewed change in the project. A breaking change to `templates/budgets.schema.json` also bumps its `schemaVersion`.
