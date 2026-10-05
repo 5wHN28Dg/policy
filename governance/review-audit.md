@@ -105,7 +105,7 @@ Anything a tool can check is checked on every commit, not saved for an audit. A 
 Rules for the checks themselves:
 
 - Dependencies are pinned by lockfile; updates arrive as their own reviewed changes. Third-party code that no lockfile can express (source tarballs, git commits, vendored copies) is pinned and listed as [`DEP-8`](../standards/dependencies.md#dep-8) requires.
-- A suppressed finding needs an inline comment with the reason and a link to its Section 10 exception.
+- A suppressed finding needs an inline comment with the reason and a link to its Section 10 exception, written `exception: <link>`.
 - A result that a review has confirmed is not a defect at all (a false positive, not an accepted risk) needs no exception. The confirmation comes from a reviewer other than the author of the code (for a solo developer, the fresh-context AI review, Section 11). It is marked where it occurs with `policy-fp: <reason> (<link to that review>)`, in the tool's own suppression syntax (for example `// nosemgrep: <rule-id> -- policy-fp: ...`, or a commented allowlist entry). Each audit lists every `policy-fp` marker and re-checks a sample of them. A marker with neither a `policy-fp` link nor an exception link fails CI.
 - The license policy (allowed, review-needed, disallowed) is written in the repo, not kept in someone's head.
 - For static analysis, "High and Critical" means a result whose severity is ERROR, HIGH or CRITICAL, from a rule that does not rate itself low-confidence and is not an audit rule (a lead for a reviewer, not a defect). Every other result is reported as a warning.

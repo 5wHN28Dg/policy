@@ -641,7 +641,7 @@ class ReviewFixTests(unittest.TestCase):
             write(Path(d), "a.js", "\n".join([
                 "el.innerHTML = x; // nosemgrep",
                 "el.innerHTML = y; // nosemgrep: web-9-html-sink-assignment -- policy-fp: constant markup (https://github.com/o/r/pull/3#r1)",
-                "el.innerHTML = z; // nosemgrep -- exception https://github.com/o/r/issues/9",
+                "el.innerHTML = z; // nosemgrep -- exception: https://github.com/o/r/issues/9",
                 f"const k = 'x'; // {pc.ALLOW_MARKER}",
             ]))
             write(Path(d), "docs/notes.md", "use // nosemgrep sparingly\n")
@@ -705,3 +705,44 @@ class ReviewFixTests(unittest.TestCase):
             self.git(d, "add", "."); self.git(d, "commit", "-qm", "b")
             write(Path(d), "budgets.json", json.dumps(new))
             self.assertEqual(pc.check_budget_loosening(Path(d), "HEAD", {}), [])
+
+
+class ReReviewTests(unittest.TestCase):
+    def test_hash_pinned_requirements_are_pinned(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "requirements.txt", "annotated-types==0.8.0 \\\n    --hash=sha256:" + "a" * 64 + " \\\n"
+                  "    --hash=sha256:" + "b" * 64 + "\n    # via pydantic\nfoo==1.0 --hash=sha256:" + "c" * 64 + "\nbar>=2\n")
+            problems = pc.check_lockfiles(Path(d), pc.Header(tier="T2"))
+            self.assertEqual([p.line for p in problems], [6])
+        own = pc.POLICY_ROOT / "tools" / "requirements-sast.txt"
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "requirements.txt", own.read_text())
+            self.assertEqual(pc.check_lockfiles(Path(d), pc.Header(tier="T2")), [])
+
+    def test_csp_other_directives_on_the_same_line(self):
+        def rules(text):
+            with tempfile.TemporaryDirectory() as d:
+                write(Path(d), "a.js", "// Content-Security-Policy\n" + text)
+                return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
+        self.assertEqual(rules('const csp = ["script-src \'self\'", "style-src \'unsafe-inline\'"].join("; ");\n'), [])
+        self.assertEqual(rules('helmet({contentSecurityPolicy: {directives: {scriptSrc: ["\'self\'"], styleSrc: ["\'unsafe-inline\'"]}}});\n'), [])
+        self.assertEqual(rules('"script-src \'self\' \'unsafe-inline\'; style-src \'self\'"\n'), ["WEB-7"])
+        self.assertEqual(rules('{scriptSrc: ["\'self\'", "\'unsafe-eval\'"], styleSrc: ["\'self\'"]}\n'), ["WEB-7"])
+
+    def test_marker_forms(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "a.js", "\n".join([
+                "x(); // nosemgrep -- no exception handling needed, see https://example.com",
+                "x(); // nosemgrep -- exception: https://github.com/o/r/issues/4",
+                'const help = "add a nosemgrep comment";',
+            ]))
+            write(Path(d), "notes.md", f"token = abc {pc.ALLOW_MARKER}\n")
+            self.assertEqual(sorted((p.file, p.line) for p in pc.check_markers(Path(d))), [("a.js", 1), ("notes.md", 1)])
+
+    def test_unresolvable_base_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            write(Path(d), ".gitleaks.toml", "[extend]\nuseDefault = true\n")
+            write(Path(d), "README.md", "Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until 2099-01-01\n")
+            self.assertIn("not available", pc.check_gitleaks_config(Path(d), "origin/nope", {})[0].message)
+            self.assertIn("not available", pc.check_baseline_change(Path(d), "origin/nope", pc.read_header(Path(d)))[0].message)

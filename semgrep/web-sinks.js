@@ -72,6 +72,10 @@ function loadScript(u) {
   const pic = new Image();
   // ok: web-10-dynamic-url-sink
   pic.src = u;
+  // ruleid: web-10-dynamic-url-sink
+  f.setAttribute("SRC", u);
+  // ruleid: web-10-dynamic-url-sink
+  a.setAttribute("HREF", u);
   const o = document.createElement("object");
   // ruleid: web-10-dynamic-url-sink
   o.data = u;

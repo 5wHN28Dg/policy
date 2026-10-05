@@ -70,7 +70,11 @@ rules:
           - patterns:
               - pattern-either:
                   - pattern: $EL.src = $V
-                  - pattern: $EL.setAttribute("src", $V)
+                  - patterns:
+                      - pattern: $EL.setAttribute($ATTR, $V)
+                      - metavariable-regex:
+                          metavariable: $ATTR
+                          regex: (?i)^["'`]src["'`]$
               - pattern-not-inside: |
                   $EL = document.createElement("img");
                   ...
@@ -184,9 +188,21 @@ rules:
           - pattern: document.location.assign($V)
           - pattern: document.location.replace($V)
           - pattern: window.open($V, ...)
-          - pattern: $EL.setAttribute("href", $V)
-          - pattern: $EL.setAttribute("action", $V)
-          - pattern: $EL.setAttribute("formaction", $V)
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]href["'`]$
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]action["'`]$
+          - patterns:
+              - pattern: $EL.setAttribute($ATTR, $V)
+              - metavariable-regex:
+                  metavariable: $ATTR
+                  regex: (?i)^["'`]formaction["'`]$
       - pattern-not: $X = "..."
       - pattern-not: window.open("...", ...)
       - pattern-not: $LOC.assign("...")

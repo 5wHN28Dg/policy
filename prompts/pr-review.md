@@ -37,7 +37,7 @@ against what the author meant.
      `pinned-sources.cdx.json` (DEP-8);
    - on T3, a change that touches a trust boundary links the adversarial pass of the fresh-context review in its
      description (Section 11);
-   - a new `nosemgrep`, `gitleaks:allow` or `policy-fp` marker carries a reason and a link to the review that
+   - a new `nosemgrep` comment, gitleaks allow comment or `policy-fp` marker carries a reason and a link to the review that
      confirmed it, and that review is not this PR's author (Section 5).
 4. Whether the declared tier still fits Section 3, given what the change does.
 5. For a project with an HTML UI (`Type:` web, webview or engine-bundling): whether the change affects the CSP (WEB-7,

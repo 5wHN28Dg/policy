@@ -459,7 +459,9 @@ def check_lockfiles(root: Path, h: Header) -> list[Problem]:
         if not re.fullmatch(r"requirements[\w.-]*\.txt", f.name) or skipped_path(rel):
             continue
         for i, raw in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            line = raw.split("#")[0].strip()
+            line = raw.split(" #")[0].strip() if not raw.lstrip().startswith("#") else ""
+            # pip-compile / uv --generate-hashes format: "pkg==1.0 \" followed by "--hash=..." lines
+            line = re.sub(r"\s+--hash[= ]\S+", "", line).rstrip("\\").strip()
             if not line or line.startswith("-"):
                 continue
             exact = re.search(r"===?\s*[^\s*,;]+(\s*;.*)?$", line) and "*" not in line
@@ -509,6 +511,8 @@ STRONG_HASHES = {"SHA-256", "SHA-384", "SHA-512", "SHA3-256", "SHA3-384", "SHA3-
 CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".py", ".nim", ".go",
                   ".rs", ".kt", ".java", ".swift", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".dart", ".rb", ".php",
                   ".json", ".json5", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
+DIRECTIVE_RE = re.compile(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b")
+NEXT_DIRECTIVE_RE = re.compile(r"\b[a-z]+-src(?:-elem|-attr)?\b|\b[a-z]+Src(?:Elem|Attr)?\b")
 CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
 COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
 CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}
@@ -541,8 +545,13 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
         for i, line in enumerate(text.splitlines(), 1):
             if COMMENT_LINE.match(line):
                 continue
-            for name, rest in re.findall(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b"
-                                         r"([^;]*)", line):
+            # A directive's sources end at ";", at the next directive name, or where its list closes ("]").
+            for m in DIRECTIVE_RE.finditer(line):
+                name = m.group(1)
+                rest = line[m.end():]
+                stop = NEXT_DIRECTIVE_RE.search(rest)
+                rest = rest[:stop.start()] if stop else rest
+                rest = re.split(r"[;\]]", rest, maxsplit=1)[0]
                 bad = [k for k in ("'unsafe-inline'", "'unsafe-eval'") if k in rest.lower()]
                 if bad and (not name.lower().startswith("default") or not has_script_src):
                     problems.append(Problem("WEB-7", f"a script directive allows {' and '.join(bad)}", rel, i))
@@ -557,6 +566,8 @@ def check_baseline_change(root: Path, base: str | None, h: Header) -> list[Probl
     """Section 1: the baseline date is set once, by the adoption PR, and never moved later."""
     if not base or not h.baseline:
         return []
+    if missing := base_missing(root, base):
+        return [missing]
     old = subprocess.run(["git", "-C", str(root), "show", f"{base}:./README.md"], capture_output=True, text=True)
     if old.returncode != 0:
         return []
@@ -575,8 +586,9 @@ def check_baseline_change(root: Path, base: str | None, h: Header) -> list[Probl
 
 
 ALLOW_MARKER = "gitleaks" + ":allow"  # built from parts: gitleaks skips every line that contains the marker itself
-MARKER_RE = re.compile(r"nosemgrep|" + re.escape(ALLOW_MARKER))
-MARKER_OK = re.compile(r"policy-fp:\s*\S.*\(\s*https?://\S+\s*\)|exception\b.*https?://\S+", re.I)
+# Semgrep honours nosemgrep only in a comment; gitleaks honours its marker anywhere on the line.
+MARKER_RE = re.compile(r"(?://|#|/\*|<!--|--|;)\s*nosemgrep\b|" + re.escape(ALLOW_MARKER))
+MARKER_OK = re.compile(r"policy-fp:\s*\S.*\(\s*https?://\S+\s*\)|\bexception:\s*https?://\S+", re.I)
 
 
 def check_markers(root: Path) -> list[Problem]:
@@ -584,7 +596,7 @@ def check_markers(root: Path) -> list[Problem]:
     problems = []
     for f in tracked_files(root):
         rel = str(f.relative_to(root))
-        if skipped_path(rel) or f.suffix.lower() in (".md", ".lock") or f.stat().st_size > 2_000_000:
+        if skipped_path(rel) or f.suffix.lower() == ".lock" or f.stat().st_size > 2_000_000:
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -592,8 +604,10 @@ def check_markers(root: Path) -> list[Problem]:
             continue
         if not MARKER_RE.search(text):
             continue
+        markdown = f.suffix.lower() in (".md", ".markdown")
         for i, line in enumerate(text.splitlines(), 1):
-            if MARKER_RE.search(line) and not MARKER_OK.search(line):
+            hit = ALLOW_MARKER in line if markdown else MARKER_RE.search(line)
+            if hit and not MARKER_OK.search(line):
                 problems.append(Problem("Gov §5", "a suppression without `policy-fp: <reason> (<link to the review that "
                                                   "confirmed it>)` or a link to its Section 10 exception", rel, i))
     return problems
@@ -693,6 +707,13 @@ def license_gate(report_path: Path) -> list[Problem]:
     return problems
 
 
+def base_missing(root: Path, base: str) -> Problem | None:
+    """A PR check that can't see its base would pass silently; fail instead."""
+    ok = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+                        capture_output=True, text=True).returncode == 0
+    return None if ok else Problem("Gov §5", f"the PR base `{base}` is not available; check out with fetch-depth: 0")
+
+
 def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Problem]:
     """Section 5 secrets scan: a project's .gitleaks.toml must extend the default rules, and a PR that changes it says
     why (the scan reads the config from the PR itself)."""
@@ -712,11 +733,13 @@ def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Pro
         if not use_default:
             problems.append(Problem("Gov §5", "`.gitleaks.toml` does not extend the default rules, so it switches every "
                                               "one of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml"))
+    if base and (missing := base_missing(root, base)):
+        return problems + [missing]
     if base:
         changed = subprocess.run(["git", "-C", str(root), "diff", "--name-only", f"{base}...HEAD", "--",
                                   ".gitleaks.toml", ".gitleaksignore"], capture_output=True, text=True).stdout.split()
-        added = subprocess.run(["git", "-C", str(root), "diff", "-U0", f"{base}...HEAD", "--", ".", ":(exclude)*.md"],
-                               capture_output=True, text=True).stdout
+        added = subprocess.run(["git", "-C", str(root), "diff", "-U0", f"{base}...HEAD"], capture_output=True,
+                               text=True).stdout
         allows = [l for l in added.splitlines() if l.startswith("+") and ALLOW_MARKER in l]
         body = ((event.get("pull_request") or {}).get("body") or "")
         if (changed or allows) and not re.search(r"(?im)^\s*Secrets config change:\s*\S", body):
