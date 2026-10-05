@@ -520,9 +520,16 @@ CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
                   ".json", ".json5", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
 DIRECTIVE_RE = re.compile(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b")
 NEXT_DIRECTIVE_RE = re.compile(r"\b[a-z]+-src(?:-elem|-attr)?\b|\b[a-z]+Src(?:Elem|Attr)?\b")
-ANY_DIRECTIVE_RE = re.compile(r"(?i)\b(?:[a-z]+-src(?:-elem|-attr)?|[a-z]+Src(?:Elem|Attr)?|base-uri|baseUri|form-action|"
-                              r"formAction|frame-ancestors|frameAncestors|sandbox|upgrade-insecure-requests|"
-                              r"require-trusted-types-for)\b")
+# The CSP directives (W3C CSP Level 3), kebab-case as in a header or meta tag, and camelCase only as an object key,
+# as configuration libraries write them (helmet's `scriptSrc: [...]`). A bare `-src`/`Src` token (an `<img data-src>`,
+# a variable named imgSrc) or `sandbox` (an iframe attribute, Electron's webPreferences) is not evidence of a CSP.
+CSP_DIRECTIVE_NAMES = ["default-src", "script-src", "script-src-elem", "script-src-attr", "style-src", "style-src-elem",
+                       "style-src-attr", "img-src", "font-src", "connect-src", "media-src", "object-src", "frame-src",
+                       "child-src", "worker-src", "manifest-src", "base-uri", "form-action", "frame-ancestors",
+                       "upgrade-insecure-requests", "require-trusted-types-for", "trusted-types", "report-to", "report-uri"]
+_camel = [re.sub(r"-([a-z])", lambda m: m.group(1).upper(), d) for d in CSP_DIRECTIVE_NAMES]
+ANY_DIRECTIVE_RE = re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, CSP_DIRECTIVE_NAMES)) + r")(?![\w-])"
+                              r"|(?<![\w$])[\"']?(?:" + "|".join(_camel) + r")[\"']?\s*:")
 CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
 COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
 CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}

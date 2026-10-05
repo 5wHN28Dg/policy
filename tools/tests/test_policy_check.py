@@ -46,6 +46,14 @@ def commit_backdated(root: Path, days: int = 3, message: str = "x") -> None:
     subprocess.run(["git", "-C", str(root), "commit", "-qm", message, "--allow-empty"], check=True, env=env)
 
 
+def csp_rules(files, tier="T2"):
+    """The rules check_csp reports for a web project made of `files`."""
+    with tempfile.TemporaryDirectory() as d:
+        for rel, text in files.items():
+            write(Path(d), rel, text)
+        return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier=tier, types=["web"]))]
+
+
 def rules(problems):
     return sorted({p.rule for p in problems})
 
@@ -1017,10 +1025,7 @@ class TrialTwoTests(unittest.TestCase):
     """Fixes from the kks-explorer v2.1 notes (4.2, 4.4, 3.4)."""
 
     def csp_rules(self, files):
-        with tempfile.TemporaryDirectory() as d:
-            for rel, text in files.items():
-                write(Path(d), rel, text)
-            return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
+        return csp_rules(files)
 
     def test_prose_about_a_missing_csp_is_not_a_csp(self):
         # 4.4: the exception describing the missing CSP made the check pass
@@ -1053,7 +1058,7 @@ class TrialTwoTests(unittest.TestCase):
 class CspReviewTests(unittest.TestCase):
     """The PR #4 review: a CSP built in code, comments, and the matrix under a baseline."""
     def rules(self, files):
-        return TrialTwoTests.csp_rules(self, files)
+        return csp_rules(files)
 
     def test_far_apart_csp_still_gets_web_7(self):
         js = ("const csp = [\n  \"default-src 'self'\",\n  \"script-src 'self' 'unsafe-inline'\",\n  \"object-src 'none'\",\n].join('; ');\n"
@@ -1086,3 +1091,24 @@ class CspReviewTests(unittest.TestCase):
                 os.environ.pop("POLICY_SKIP_BROWSERSLIST", None)
                 problems = pc.conformance(root, None, {})
         self.assertEqual([(p.rule, p.level) for p in problems if p.rule.startswith("WEB-1")], [("WEB-1", "warning")])
+
+
+class CspDirectiveNameTests(unittest.TestCase):
+    """A file that names the header and merely contains a -src token is not a CSP (PR #4 re-review)."""
+
+    def test_not_a_csp(self):
+        cases = {
+            "removeHeader": "res.removeHeader('Content-Security-Policy');\nconst avatarSrc = user.avatar;\n",
+            "getHeader": "if (!res.getHeader('Content-Security-Policy')) warn();\nconst imgSrc = pick();\n",
+            "empty meta": '<meta http-equiv="Content-Security-Policy" content="">\n<img data-src="a.png">\n',
+            "electron sandbox": "const H = 'Content-Security-Policy';\nnew BrowserWindow({ webPreferences: { sandbox: true } });\n",
+            "iframe sandbox": '<meta name="note" content="Content-Security-Policy">\n<iframe sandbox src="x.html"></iframe>\n',
+        }
+        for name, text in cases.items():
+            ext = "html" if "<" in text else "js"
+            self.assertEqual(csp_rules({f"a.{ext}": text}), ["WEB-8"], name)
+
+    def test_real_directives_still_count(self):
+        self.assertEqual(csp_rules({"a.js": "helmet({contentSecurityPolicy: {directives: {defaultSrc: [\"'self'\"]}}});\n"}), [])
+        self.assertEqual(csp_rules({"a.js": "const d = {\"frame-ancestors\": [\"'none'\"]};\nhdr('Content-Security-Policy', d);\n"}), [])
+        self.assertEqual(csp_rules({"a.html": "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'self'\">\n"}), [])
