@@ -42,4 +42,7 @@ runs:
         code=$?
         set -e
         if [[ $code -ne 0 && $code -ne 1 && $code -ne 128 ]]; then exit "$code"; fi
+        if [[ $code -ne 128 && ! -s $RUNNER_TEMP/osv-licenses.json ]]; then
+          echo "::error::Gov §5: osv-scanner wrote no license report"; exit 1
+        fi
         python3 "${{ github.action_path }}/../../tools/policy_check.py" licenses --report "$RUNNER_TEMP/osv-licenses.json"

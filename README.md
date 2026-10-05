@@ -35,7 +35,7 @@ Tiers: T0 projects follow only the governance rules for T0 (a secrets scan); the
    Users: none
    ```
 
-   `Type:` lists every project type from the table above that applies (`web`, `native`, `service`, `firmware`, `webview`, `engine-bundling`). `Users: none` is optional: it marks a solo T2 project with no external users yet, which gets the [Section 11](governance/review-audit.md#11-solo-developer-adaptations) lighter-T2 relief. Remove it at the first release others install or depend on.
+   `Type:` lists every project type from the table above that applies (`web`, `native`, `service`, `firmware`, `webview`, `engine-bundling`). `Users: none` is optional: it marks a solo T2 project with no external users yet, which gets the [Section 11](governance/review-audit.md#11-solo-developer-adaptations) lighter-T2 relief. Remove it at the first release others install or depend on, or when the project adds a network-facing service, whichever comes first.
 2. Find the project's type in the table above. Its standard says what else the README must declare: target browsers (`browserslist`), OS versions, or the runtime.
 3. Write `docs/capability-matrix.md` from [the template](templates/capability-matrix.md), before choosing the stack in a new project.
 4. From T2: add `budgets.json` (validate it against [the schema](templates/budgets.schema.json); start from [the example](templates/budgets.example.json) but set your own numbers) and the CI jobs that read it.
@@ -67,7 +67,7 @@ Known limit: Semgrep's `p/default` ruleset, used from full T2, is fetched from t
 tools/audit.sh --scope "the sync protocol" ~/code/my-project
 ```
 
-It audits a copy of the project's last commit, without its git history (commit messages are rationale too), in one new Claude Code session with your customizations off. Pass 1 is blind: the rationale paths (default `CLAUDE.md CLAUDE.local.md .claude docs/decisions`, change them with `--rationale`) are removed. Pass 2 resumes the same session with the rationale added and attacks it. Claude can only read, search and list files. Check out the policy version the project declares first; the script warns if they differ. The reports land next to the project in `<name>-audit-<date>/`. Confirm each finding before recording it, and keep the final report with the release (Section 7).
+It audits a copy of the project's last commit, without its git history (commit messages are rationale too), in one new Claude Code session with your customizations off. Pass 1 is blind: the rationale paths (default `CLAUDE.md .claude docs/decisions`, change them with `--rationale`) are removed. Only committed files are audited, so gitignored notes such as `CLAUDE.local.md` are never shown to the auditor. Pass 2 resumes the same session with the rationale added and attacks it. Claude can only read, search and list files. Check out the policy version the project declares first; the script warns if they differ. The reports land next to the project in `<name>-audit-<date>/`. Confirm each finding before recording it, and keep the final report with the release (Section 7).
 
 ## Changing the policy
 

@@ -4,7 +4,8 @@
 #   tools/audit.sh [options] <project-dir>
 #
 #   -r, --rationale PATHS  space-separated paths holding the design rationale, hidden in pass 1 and shown in pass 2
-#                          (default: "CLAUDE.md CLAUDE.local.md .claude docs/decisions")
+#                          (default: "CLAUDE.md .claude docs/decisions"). Only committed files are audited, so a
+#                          gitignored file such as CLAUDE.local.md is never shown to the auditor in either pass
 #   -s, --scope TEXT       extra scope for the auditor, e.g. "the sync protocol and the relay"
 #   -o, --out DIR          where the reports go (default: <project-dir>/../<name>-audit-<date>)
 #   -m, --model MODEL      Claude model (default: your Claude Code default)
@@ -18,7 +19,7 @@
 set -euo pipefail
 
 policy_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-rationale="CLAUDE.md CLAUDE.local.md .claude docs/decisions"
+rationale="CLAUDE.md .claude docs/decisions"
 scope="none"
 out=""
 model=()  # expanded as ${model[@]+"${model[@]}"} so that bash 3.2 with set -u accepts it empty
@@ -70,8 +71,14 @@ rm -rf "$work/clone/.git"
 mv "$work/clone" "$work/src"
 work="$work/src"
 hidden=()
+inside() {  # true if the parent directory of $1 resolves inside the snapshot
+  local parent
+  parent=$(realpath -m -- "$work/$(dirname -- "$1")")
+  [[ $parent == "$work" || $parent == "$work"/* ]]
+}
 for p in $rationale; do
-  if [[ -e $work/$p ]]; then hidden+=("$p"); rm -rf -- "${work:?}/$p"; fi
+  if ! inside "$p"; then echo "skipping rationale path '$p': it resolves outside the snapshot" >&2; continue; fi
+  if [[ -e $work/$p || -L $work/$p ]]; then hidden+=("$p"); rm -rf -- "${work:?}/$p"; fi
 done
 echo "auditing $name at $commit in $work (hidden for pass 1: ${hidden[*]:-nothing})" >&2
 
@@ -100,8 +107,9 @@ if $pass1_only || [[ ${#hidden[@]} -eq 0 ]]; then
 fi
 
 for p in "${hidden[@]}"; do
+  inside "$p" || continue
   mkdir -p "$work/$(dirname "$p")"
-  git -C "$project" archive --format=tar "$full_commit" -- "$p" | tar -x -C "$work"
+  git -C "$project" archive --format=tar "$full_commit" -- "$p" | tar -x --no-overwrite-dir -C "$work"
 done
 
 echo "pass 2 (adversarial)..." >&2

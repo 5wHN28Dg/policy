@@ -42,17 +42,23 @@ runs:
         if [[ -z $PR_NUMBER ]]; then echo "::error::claude-review runs on pull_request events only"; exit 1; fi
         workspace=$(pwd -P)
         deny=()
+        excludes=()
         for p in $HIDE; do
-          target=$(realpath -m -- "$workspace/$p")
-          if [[ $target != "$workspace"/* ]]; then echo "::error::hide path '$p' is outside the repository"; exit 1; fi
-          rm -rf -- "$target"
+          # Resolve only the parent: if a PR turns a hidden path into a symlink, delete the link, not its target.
+          parent=$(realpath -m -- "$workspace/$(dirname -- "$p")")
+          if [[ $parent != "$workspace" && $parent != "$workspace"/* ]]; then
+            echo "::error::hide path '$p' is outside the repository"; exit 1
+          fi
+          rm -rf -- "$parent/$(basename -- "$p")"
           deny+=("Read(./$p)" "Read(./$p/**)")
+          excludes+=(":(exclude)$p" ":(exclude)$p/**")
         done
         deny+=("Read(./.git/**)" "Read(./.claude-pr/**)")
         review_dir="$RUNNER_TEMP/policy-review"
         rm -rf "$review_dir" && mkdir -p "$review_dir"
         git fetch --quiet --no-tags origin "$BASE_SHA" 2>/dev/null || true
-        git diff --no-ext-diff "$BASE_SHA...$HEAD_SHA" > "$review_dir/pr.diff"
+        # The diff leaves out the hidden paths too, or a PR that edits them would hand the rationale to the reviewer.
+        git diff --no-ext-diff "$BASE_SHA...$HEAD_SHA" -- . "${excludes[@]}" > "$review_dir/pr.diff"
         printf '# %s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$review_dir/pr.md"
         policy_dir=$(cd "$POLICY_DIR" && pwd -P)
         export POLICY_DIR=$policy_dir REVIEW_DIR=$review_dir
@@ -125,8 +131,10 @@ runs:
         echo "summary-file=$summary" >> "$GITHUB_OUTPUT"
         marker='<!-- policy-claude-review -->'
         body="$marker"$'\n'"$(cat "$summary")"
+        # The default token can't read /user; it posts as github-actions[bot]. A PAT or App token posts as its owner.
+        login=$(gh api user -q .login 2>/dev/null || echo "github-actions[bot]")
         id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
-               -q ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | tail -1)
+               -q ".[] | select(.user.login == \"$login\" and (.body | startswith(\"$marker\"))) | .id" | tail -1)
         if [[ -n $id ]]; then
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
         else
