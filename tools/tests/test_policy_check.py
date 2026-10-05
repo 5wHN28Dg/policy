@@ -1112,3 +1112,4 @@ class CspDirectiveNameTests(unittest.TestCase):
         self.assertEqual(csp_rules({"a.js": "helmet({contentSecurityPolicy: {directives: {defaultSrc: [\"'self'\"]}}});\n"}), [])
         self.assertEqual(csp_rules({"a.js": "const d = {\"frame-ancestors\": [\"'none'\"]};\nhdr('Content-Security-Policy', d);\n"}), [])
         self.assertEqual(csp_rules({"a.html": "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'self'\">\n"}), [])
+        self.assertEqual(csp_rules({"_headers": "Content-Security-Policy: Default-Src 'self'\n"}), [])  # names are case-insensitive

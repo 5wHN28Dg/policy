@@ -528,7 +528,7 @@ CSP_DIRECTIVE_NAMES = ["default-src", "script-src", "script-src-elem", "script-s
                        "child-src", "worker-src", "manifest-src", "base-uri", "form-action", "frame-ancestors",
                        "upgrade-insecure-requests", "require-trusted-types-for", "trusted-types", "report-to", "report-uri"]
 _camel = [re.sub(r"-([a-z])", lambda m: m.group(1).upper(), d) for d in CSP_DIRECTIVE_NAMES]
-ANY_DIRECTIVE_RE = re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, CSP_DIRECTIVE_NAMES)) + r")(?![\w-])"
+ANY_DIRECTIVE_RE = re.compile(r"(?<![\w-])(?i:" + "|".join(map(re.escape, CSP_DIRECTIVE_NAMES)) + r")(?![\w-])"
                               r"|(?<![\w$])[\"']?(?:" + "|".join(_camel) + r")[\"']?\s*:")
 CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
 COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
