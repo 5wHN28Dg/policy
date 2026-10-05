@@ -1,0 +1,63 @@
+{
+  "$schema": "https://example.invalid/policy/templates/budgets.schema.json",
+  "schemaVersion": 1,
+  "notes": "EXAMPLE ONLY. Every number here is a placeholder; set your own from a measurement of the project. The lab LCP and CLS values and the field INP value are Google's published 'good' thresholds, a common starting point; TBT has no official threshold, so measure your own baseline.",
+  "web": {
+    "bundles": [
+      {
+        "name": "initial route",
+        "files": "dist/assets/index-*.js",
+        "compression": "brotli",
+        "maxKB": 100
+      }
+    ],
+    "lab": {
+      "profile": "Lighthouse mobile preset",
+      "runs": 5,
+      "lcpMs": 2500,
+      "cls": 0.1,
+      "tbtMs": 200
+    },
+    "field": {
+      "percentile": 75,
+      "source": "CrUX",
+      "inpMs": 200,
+      "lcpMs": 2500,
+      "cls": 0.1
+    }
+  },
+  "native": {
+    "windows": {
+      "measuredOn": "GitHub windows-latest runner, clean install",
+      "scenario": "launch, open a sample document, idle 30 s",
+      "runs": 5,
+      "startupMs": 800,
+      "memoryMB": 60,
+      "installedSizeMB": 25
+    },
+    "linux": {
+      "measuredOn": "GitHub ubuntu-latest runner, clean install",
+      "scenario": "launch, open a sample document, idle 30 s",
+      "runs": 5,
+      "startupMs": 800,
+      "memoryMB": 60,
+      "installedSizeMB": 25
+    }
+  },
+  "custom": [
+    {
+      "name": "firmware flash used",
+      "unit": "KB",
+      "max": 1600,
+      "measuredBy": "esphome compile, size report",
+      "measuredWhere": "ci"
+    },
+    {
+      "name": "free heap after boot",
+      "unit": "KB",
+      "min": 40,
+      "measuredBy": "debug component log on the test board",
+      "measuredWhere": "release-test"
+    }
+  ]
+}

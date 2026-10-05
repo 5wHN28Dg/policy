@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budgets.schema.json",
+  "title": "Project budgets",
+  "description": "Thresholds a project measures against. Required by NAT-7, WEB-15 and OTH-5. The standards require the file; the project sets the numbers. A CI-measured value past its threshold fails CI; a PR that loosens a threshold states its reason.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "web"
+      ]
+    },
+    {
+      "required": [
+        "native"
+      ]
+    },
+    {
+      "required": [
+        "custom"
+      ]
+    }
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "notes": {
+      "type": "string",
+      "description": "Why the numbers are what they are."
+    },
+    "web": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundles",
+        "lab"
+      ],
+      "properties": {
+        "bundles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "files",
+              "compression",
+              "maxKB"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "A route, entry point or chunk name."
+              },
+              "files": {
+                "type": "string",
+                "description": "Glob for the built files counted in this budget."
+              },
+              "compression": {
+                "enum": [
+                  "gzip",
+                  "brotli",
+                  "none"
+                ]
+              },
+              "maxKB": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          }
+        },
+        "lab": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Synthetic runs in CI; these gate merges (WEB-15).",
+          "required": [
+            "profile",
+            "lcpMs",
+            "cls",
+            "tbtMs",
+            "runs"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "description": "Device and network profile, e.g. a Lighthouse preset."
+            },
+            "runs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of runs; the median is compared."
+            },
+            "lcpMs": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "cls": {
+              "type": "number",
+              "minimum": 0
+            },
+            "tbtMs": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "field": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Real-user monitoring. Compared at each release; a breach is a finding, not a merge gate (WEB-15).",
+          "required": [
+            "percentile",
+            "inpMs"
+          ],
+          "properties": {
+            "percentile": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "source": {
+              "type": "string",
+              "description": "Where the data comes from, e.g. CrUX or your RUM tool."
+            },
+            "inpMs": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "lcpMs": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "cls": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "native": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "windows",
+          "macos",
+          "linux",
+          "android",
+          "ios",
+          "ipados"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "measuredOn",
+          "scenario",
+          "runs",
+          "startupMs",
+          "memoryMB",
+          "installedSizeMB"
+        ],
+        "properties": {
+          "measuredOn": {
+            "type": "string",
+            "description": "The clean machine, device or CI runner the numbers are measured on."
+          },
+          "startupMs": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Launch to first usable frame."
+          },
+          "memoryMB": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Steady-state working set after a stated scenario."
+          },
+          "installedSizeMB": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "scenario": {
+            "type": "string",
+            "description": "What the app does before memory is read, e.g. 'open a 1 MB file, idle 30 s'."
+          },
+          "runs": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of runs per CI job; the median is compared."
+          }
+        }
+      }
+    },
+    "custom": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Any other metric: firmware flash and free heap, service memory or latency.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "unit",
+          "measuredBy",
+          "measuredWhere"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "max"
+            ],
+            "not": {
+              "required": [
+                "min"
+              ]
+            }
+          },
+          {
+            "required": [
+              "min"
+            ],
+            "not": {
+              "required": [
+                "max"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "max": {
+            "type": "number",
+            "description": "Fail when the measured value is above this."
+          },
+          "min": {
+            "type": "number",
+            "description": "Fail when the measured value is below this."
+          },
+          "measuredBy": {
+            "type": "string",
+            "description": "The CI job, command or test procedure that produces the value."
+          },
+          "measuredWhere": {
+            "enum": [
+              "ci",
+              "release-test"
+            ],
+            "description": "ci: measured on every PR and fails CI. release-test: needs real hardware; measured before each release and recorded in the release notes (OTH-5)."
+          },
+          "runs": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of runs; the median is compared."
+          }
+        }
+      }
+    }
+  }
+}
