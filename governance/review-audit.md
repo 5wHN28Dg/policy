@@ -95,7 +95,7 @@ Anything a tool can check is checked on every commit, not saved for an audit. A 
 | Build, lint, formatting | Language defaults | Blocking | Blocking |
 | Unit and integration tests | Language defaults | Blocking | Blocking |
 | Known-vulnerable dependencies | osv-scanner, Dependabot, pip-audit, npm audit | Warning | Blocking on High and Critical; on T3, blocking on every severity |
-| Static security analysis | Semgrep, CodeQL | Not required | Blocking on High and Critical |
+| Static security analysis | Semgrep, CodeQL | Not required | Blocking on High and Critical, on T3 as well |
 | License compliance | ScanCode, REUSE lint, license-checker | Not required | Blocking on disallowed licenses |
 | Software bill of materials | Syft, CycloneDX | Not required | Generated for every release |
 | Test coverage on changed lines | Coverage tool | Reported | Reported; not a merge gate (see below) |
