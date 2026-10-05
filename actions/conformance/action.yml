@@ -4,6 +4,9 @@ description: >-
   required files per tier, budgets.json against the schema, loosened budgets, DEP-7 pins, and the WEB-1
   resolved browser list. Run after actions/checkout with fetch-depth 0.
 inputs:
+  working-directory:
+    description: The project root, relative to the workspace (for monorepos and tests).
+    default: '.'
   base-ref:
     description: Git ref of the PR base, to detect loosened budgets. Defaults to the PR's base branch.
     default: ''
@@ -14,12 +17,13 @@ runs:
       with:
         python-version: '3.13'
     - shell: bash
-      run: python -m pip install --quiet --disable-pip-version-check -r "${{ github.action_path }}/../../tools/requirements.txt"
+      run: python -m pip install --quiet --disable-pip-version-check --require-hashes -r "${{ github.action_path }}/../../tools/requirements.txt"
     - shell: bash
       env:
+        PROJECT_DIR: ${{ inputs.working-directory }}
         BASE_REF: ${{ inputs.base-ref || (github.base_ref && format('origin/{0}', github.base_ref)) || '' }}
       run: |
-        args=(conformance --root "$GITHUB_WORKSPACE")
+        args=(conformance --root "$GITHUB_WORKSPACE/$PROJECT_DIR")
         if [[ -n $BASE_REF ]]; then
           git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags origin "${BASE_REF#origin/}" || true
           args+=(--base "$BASE_REF")

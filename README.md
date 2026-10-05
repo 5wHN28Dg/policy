@@ -57,7 +57,9 @@ The policy ships the CI that checks it. A project copies [templates/ci/policy.ym
 
 Everything else a rule's Check names (records, matrices, manual checks, threat-model content) is for the PR review and the release audit.
 
-**PR review (Claude, in CI).** Needs a repository secret `CLAUDE_CODE_OAUTH_TOKEN`: run `claude setup-token` (Claude Pro or Max), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN` in the project. It runs only for PRs from the project's own branches, never from forks. Before Claude starts, the action removes `CLAUDE.md`, `CLAUDE.local.md` and `.claude/` from its checkout, so the review is a blind pass (Section 11). Its output is leads, not findings.
+Known limit: Semgrep's `p/default` ruleset, used from full T2, is fetched from the Semgrep registry at run time and is not versioned, so a registry update can fail a build with no change in the project. Treat such a failure as a new finding, not a broken build.
+
+**PR review (Claude, in CI).** Needs a repository secret `CLAUDE_CODE_OAUTH_TOKEN`: run `claude setup-token` (Claude Pro or Max), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN` in the project. It runs only for PRs from the project's own branches, never from forks. The review is a blind pass (Section 11): `CLAUDE.md`, `CLAUDE.local.md`, `.claude/` and `docs/decisions/` (change the list with the `hide` input) are deleted from its checkout and denied to Claude's file tools, and in-repo Claude settings are not loaded. Claude can read the checkout, the policy and the PR's diff, post inline comments, and nothing else: no shell, no writes, no web. Treat everything in a PR as untrusted, including its description; the summary is scrubbed of anything token-shaped before it is posted. Its output is leads, not findings.
 
 **Release audit (Claude, on your machine).** Run [tools/audit.sh](tools/audit.sh) from a clone of this repo:
 
@@ -65,7 +67,7 @@ Everything else a rule's Check names (records, matrices, manual checks, threat-m
 tools/audit.sh --scope "the sync protocol" ~/code/my-project
 ```
 
-It audits a copy of the project's last commit, never the working tree, in one new Claude Code session with your customizations off. Pass 1 is blind: the rationale paths (default `CLAUDE.md CLAUDE.local.md .claude docs/decisions`, change them with `--rationale`) are removed. Pass 2 resumes the same session with the rationale added and attacks it. Claude can only read files and run read-only git commands. The reports land next to the project in `<name>-audit-<date>/`. Confirm each finding before recording it, and keep the final report with the release (Section 7).
+It audits a copy of the project's last commit, without its git history (commit messages are rationale too), in one new Claude Code session with your customizations off. Pass 1 is blind: the rationale paths (default `CLAUDE.md CLAUDE.local.md .claude docs/decisions`, change them with `--rationale`) are removed. Pass 2 resumes the same session with the rationale added and attacks it. Claude can only read, search and list files. Check out the policy version the project declares first; the script warns if they differ. The reports land next to the project in `<name>-audit-<date>/`. Confirm each finding before recording it, and keep the final report with the release (Section 7).
 
 ## Changing the policy
 

@@ -17,8 +17,11 @@ rules:
           - pattern: document.write(...)
           - pattern: document.writeln(...)
           - pattern: $R.createContextualFragment($V)
+          - pattern: $EL.setAttribute("srcdoc", $V)
       - pattern-not: $EL.$PROP = "..."
       - pattern-not: $EL.insertAdjacentHTML($POS, "...")
+      - pattern-not: $EL.setAttribute($A, "...")
+      - pattern-not: $EL.setAttribute($A, $SAN.sanitize(...))
       - pattern-not: $EL.$PROP = $SAN.sanitize(...)
       - pattern-not: $EL.insertAdjacentHTML($POS, $SAN.sanitize(...))
 
@@ -67,18 +70,25 @@ rules:
           - pattern: $EL.formAction = $V
           - pattern: location.href = $V
           - pattern: window.location.href = $V
+          - pattern: document.location.href = $V
           - pattern: location = $V
           - pattern: window.location = $V
+          - pattern: document.location = $V
           - pattern: location.assign($V)
           - pattern: location.replace($V)
+          - pattern: window.location.assign($V)
+          - pattern: window.location.replace($V)
+          - pattern: document.location.assign($V)
+          - pattern: document.location.replace($V)
           - pattern: window.open($V, ...)
           - pattern: $EL.setAttribute("href", $V)
           - pattern: $EL.setAttribute("src", $V)
           - pattern: $EL.setAttribute("action", $V)
+          - pattern: $EL.setAttribute("formaction", $V)
       - pattern-not: $X = "..."
       - pattern-not: window.open("...", ...)
-      - pattern-not: location.assign("...")
-      - pattern-not: location.replace("...")
+      - pattern-not: $LOC.assign("...")
+      - pattern-not: $LOC.replace("...")
       - pattern-not: $EL.setAttribute($A, "...")
       - pattern-not: $EL.$P = $U.safeUrl(...)
       - pattern-not: $L.$M($U.safeUrl(...), ...)
@@ -90,4 +100,6 @@ rules:
     message: >-
       WEB-10: a javascript: URL. Use an event listener instead.
     metadata: { policy-rule: WEB-10 }
+    paths:
+      exclude: ["*.test.*", "*.spec.*", "**/test/**", "**/tests/**", "**/__tests__/**"]
     pattern-regex: '(?i)["`'']\s*javascript:'

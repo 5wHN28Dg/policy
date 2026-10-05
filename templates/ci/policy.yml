@@ -11,7 +11,8 @@ name: Policy
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `edited` re-runs the checks when the description changes, e.g. after adding a `Budget change:` line.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
     tags: ['v*']
@@ -58,7 +59,7 @@ jobs:
 
   claude-review:
     if: >-
-      github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+      github.event_name == 'pull_request' && github.event.action != 'edited' && !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     permissions:
@@ -73,6 +74,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false   # the reviewer reads the checkout; keep the token out of .git/config
       - if: steps.secret.outputs.present == 'yes'
         uses: 5wHN28Dg/policy/actions/claude-review@POLICY_SHA # v1.1
         with:

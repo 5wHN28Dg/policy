@@ -43,6 +43,12 @@ class HeaderTests(unittest.TestCase):
             h = pc.read_header(Path(d))
             self.assertEqual((h.tier, h.policy, h.types, h.users), ("T3", "v1.1", ["web", "firmware"], "none"))
 
+    def test_header_ignores_code_blocks_and_later_sections(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "README.md", "# App\n\nTier: T2\nPolicy: [v1.1](https://x/y)\nType: web\n\n```yaml\nusers: none\n```\n\n## Usage\n\nType: anything you like\nUsers: none\n")
+            h = pc.read_header(Path(d))
+            self.assertEqual((h.tier, h.policy, h.types, h.users, h.lighter_t2), ("T2", "v1.1", ["web"], None, False))
+
     def test_tier_with_label(self):
         with tempfile.TemporaryDirectory() as d:
             write(Path(d), "README.md", "Tier: T2 (Public)\n")
@@ -104,6 +110,13 @@ class ConformanceTests(unittest.TestCase):
             write(root, "README.md", "Tier: T2\nPolicy: v1.1\nType: native\nUsers: none\n")
             for f in ("docs/threat-model.md", "license-allowlist.txt", "budgets.json"):
                 (root / f).unlink()
+            self.assertEqual(pc.conformance(root, None, {}), [])
+
+    def test_security_md_in_github_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            compliant_project(root)
+            (root / "SECURITY.md").rename(root / "docs" / "SECURITY.md")
             self.assertEqual(pc.conformance(root, None, {}), [])
 
     def test_matrix_needs_checked_date(self):
@@ -171,7 +184,21 @@ class PinTests(unittest.TestCase):
             "FROM --platform=linux/amd64 debian:12",
             "FROM ${BASE}",
         ])})
-        self.assertEqual([p.line for p in problems], [1, 5])
+        self.assertEqual([p.line for p in problems], [1, 5, 6])
+        self.assertIn("no default", problems[2].message)
+
+    def test_dockerfile_variants_args_and_stage_case(self):
+        problems = self.check({
+            "deploy/Dockerfile.prod": "ARG BASE=ubuntu:22.04\nFROM ${BASE} AS Build\nFROM build\n",
+            "Containerfile.dev": f"ARG BASE=debian@{DIGEST}\nFROM $BASE\n",
+        })
+        self.assertEqual([(p.file, p.line) for p in problems], [("deploy/Dockerfile.prod", 2)])
+        self.assertIn("ubuntu:22.04", problems[0].message)
+
+    def test_kubernetes_manifest(self):
+        problems = self.check({"k8s/app.yaml": f"apiVersion: apps/v1\nkind: Deployment\nspec:\n  containers:\n    - image: app:1.2\n    - image: app@{DIGEST}\n",
+                               "config/settings.yaml": "image: not-a-manifest\n"})
+        self.assertEqual([(p.file, p.line) for p in problems], [("k8s/app.yaml", 5)])
 
     def test_compose(self):
         problems = self.check({"docker-compose.yml": f"services:\n  a:\n    image: nginx:1.27\n  b:\n    image: nginx@{DIGEST}\n"})
@@ -202,6 +229,17 @@ class BudgetLooseningTests(unittest.TestCase):
             ok = pc.check_budget_loosening(Path(d), base, {"pull_request": {"body": "Budget change: the chart library, see DEP record"}})
             self.assertEqual(ok, [])
 
+    def test_removed_or_moved_out_of_ci_counts(self):
+        old = json.loads(EXAMPLE_BUDGETS)
+        new = json.loads(EXAMPLE_BUDGETS)
+        del new["native"]["linux"]
+        new["custom"][0]["measuredWhere"] = "release-test"
+        with tempfile.TemporaryDirectory() as d:
+            base = self.repo(Path(d), old, new)
+            msg = pc.check_budget_loosening(Path(d), base, {})[0].message
+            self.assertIn("native.linux.startupMs: removed", msg)
+            self.assertIn("firmware flash used]@ci.max: removed", msg)
+
     def test_tightening_is_fine(self):
         old = json.loads(EXAMPLE_BUDGETS)
         new = json.loads(EXAMPLE_BUDGETS)
@@ -222,6 +260,32 @@ class BrowserslistTests(unittest.TestCase):
             write(root, "package.json", "{}")
             problems = pc.check_browserslist(root, pc.Header(tier="T1", types=["web"]))
             self.assertEqual([p.rule for p in problems], ["WEB-2"])
+
+    def test_recorded_list_parsing(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = Path(d) / "m.md"
+            m.write_text("Checked: x\nResolved browser list (web only):\n\n```\nchrome 140\nsafari 26.0\n```\n")
+            self.assertEqual(pc.recorded_browsers(m), {"chrome 140", "safari 26.0"})
+            m.write_text("Resolved browser list (web only): <output of npx browserslist>\n")
+            self.assertIsNone(pc.recorded_browsers(m))
+
+    def test_differs_both_ways(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, ".browserslistrc", "defaults\n")
+            write(root, "docs/capability-matrix.md", "Resolved browser list:\n```\nchrome 140\nie 11\n```\n")
+            fake = root / "bin" / "npx"
+            write(root, "bin/npx", "#!/bin/sh\nprintf 'chrome 140\\nfirefox 143\\n'\n")
+            fake.chmod(0o755)
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = f"{root / 'bin'}:{old_path}"
+            try:
+                problems = pc.check_browserslist(root, pc.Header(tier="T1", types=["web"]))
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(len(problems), 1)
+            self.assertIn("now includes firefox 143", problems[0].message)
+            self.assertIn("no longer includes ie 11", problems[0].message)
 
     def test_not_web(self):
         with tempfile.TemporaryDirectory() as d:
@@ -273,8 +337,38 @@ class VulnGateTests(unittest.TestCase):
 
     def test_t2_blocks_high_and_critical(self):
         blocking, warnings = self.gate("T2")
-        self.assertEqual([b.message.split()[2] for b in blocking], ["a"])
+        # a: CVSS 9.8; c: no score and no database rating, so assumed severe
+        self.assertEqual([b.message.split()[2] for b in blocking], ["a", "c"])
+        self.assertEqual(len(warnings), 1)
+
+    def test_database_severity_fallback(self):
+        report = {"results": [{"source": {"path": "/x/go.sum"}, "packages": [
+            {"package": {"name": "h", "version": "1"}, "groups": [{"ids": ["GO-1"], "max_severity": ""}],
+             "vulnerabilities": [{"id": "GO-1", "database_specific": {"severity": "HIGH"}}]},
+            {"package": {"name": "m", "version": "1"}, "groups": [{"ids": ["GO-2"], "max_severity": ""}],
+             "vulnerabilities": [{"id": "GO-2", "database_specific": {"severity": "MODERATE"}}]},
+        ]}]}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "osv.json"
+            p.write_text(json.dumps(report))
+            blocking, warnings = pc.vuln_gate(p, "T2")
+        self.assertEqual([b.message.split()[2] for b in blocking], ["h"])
+        self.assertIn("severity MODERATE", warnings[0].message)
+
+    def test_real_osv_report(self):
+        fixture = Path(__file__).parent / "fixtures" / "osv-licenses-and-vulns.json"
+        blocking, warnings = pc.vuln_gate(fixture, "T2")
+        self.assertEqual(len(blocking), 1)  # lodash GHSA-35jh, CVSS 8.1
         self.assertEqual(len(warnings), 2)
+        self.assertEqual(pc.vuln_gate(fixture, "T1")[0], [])
+
+
+class LicenseGateTests(unittest.TestCase):
+    def test_violations_only(self):
+        fixture = Path(__file__).parent / "fixtures" / "osv-licenses-and-vulns.json"
+        problems = pc.license_gate(fixture)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("left-pad 1.3.0 has license WTFPL", problems[0].message)
 
     def test_missing_report_is_clean(self):
         self.assertEqual(pc.vuln_gate(Path("/nonexistent.json"), "T3"), ([], []))

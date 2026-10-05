@@ -6,13 +6,15 @@ Usage:
     policy_check.py tier [--root DIR]
     policy_check.py header [--root DIR]
     policy_check.py vulns --report FILE [--root DIR]
+    policy_check.py licenses --report FILE
     policy_check.py pins [--root DIR]
 
 `conformance` prints one line per problem, as GitHub annotations when run in
 Actions, and exits 1 if any rule fails. `tier` prints the declared tier
 (T0-T3). `header` prints the parsed README header as JSON. `vulns` applies the
 Section 5 gate to an osv-scanner JSON report: warnings on T1, failure on High
-or Critical (CVSS 7.0 and up) from T2. `pins` runs only the DEP-7 check.
+or Critical (CVSS 7.0 and up) from T2. `licenses` fails on license violations in an
+osv-scanner report made with --licenses. `pins` runs only the DEP-7 check.
 
 Each problem names the rule it comes from, so a finding can cite it.
 """
@@ -69,12 +71,21 @@ def read_header(root: Path) -> Header:
     readme = root / "README.md"
     if not readme.is_file():
         return header
+    in_fence = False
     for raw in readme.read_text(encoding="utf-8", errors="replace").splitlines():
+        if raw.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if re.match(r"^#{2,}\s", raw):
+            break  # the header lines belong at the top, before the first section
         line = raw.strip().strip("*_").strip()
         m = re.match(r"(?i)^(tier|policy|type|users)\s*:\s*\**\s*(.+?)\s*\**$", line)
         if not m:
             continue
-        key, value = m.group(1).lower(), m.group(2).strip("`* ")
+        key = m.group(1).lower()
+        value = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", m.group(2)).strip("`* ")
         if key == "tier" and header.tier is None:
             t = re.match(r"(?i)^T([0-3])\b", value)
             header.tier = f"T{t.group(1)}" if t else value
@@ -111,7 +122,7 @@ def check_header(root: Path, h: Header) -> list[Problem]:
 def check_files(root: Path, h: Header) -> list[Problem]:
     problems = []
     n = h.tier_num
-    if n >= 1 and not (root / "SECURITY.md").is_file():
+    if n >= 1 and not any((root / d / "SECURITY.md").is_file() for d in (".", ".github", "docs")):
         problems.append(Problem("Gov §1", "SECURITY.md is missing (how to report a vulnerability)"))
     if n >= 2 and not h.lighter_t2 and not (root / "docs" / "threat-model.md").is_file():
         problems.append(Problem("Gov §4", "docs/threat-model.md is missing (required from T2)"))
@@ -158,7 +169,10 @@ def budget_rule(h: Header) -> str:
 
 
 def thresholds(data: dict) -> dict[str, tuple[str, float]]:
-    """Flatten budgets.json into {path: (direction, value)}; direction is 'max' or 'min'."""
+    """Flatten budgets.json into {path: (direction, value)}; direction is 'max' or 'min'.
+
+    A custom metric measured in CI is keyed separately from one measured in a release test, so moving a metric out
+    of CI shows up as a removed CI threshold."""
     out: dict[str, tuple[str, float]] = {}
     web = data.get("web", {})
     for b in web.get("bundles", []):
@@ -172,9 +186,10 @@ def thresholds(data: dict) -> dict[str, tuple[str, float]]:
             if k in m:
                 out[f"native.{platform}.{k}"] = ("max", m[k])
     for c in data.get("custom", []):
+        where = c.get("measuredWhere", "ci")
         for d in ("max", "min"):
             if d in c:
-                out[f"custom[{c.get('name')}].{d}"] = (d, c[d])
+                out[f"custom[{c.get('name')}]@{where}.{d}"] = (d, c[d])
     return out
 
 
@@ -184,7 +199,7 @@ def check_budget_loosening(root: Path, base: str | None, event: dict) -> list[Pr
         return []
     try:
         old_text = subprocess.run(
-            ["git", "-C", str(root), "show", f"{base}:budgets.json"],
+            ["git", "-C", str(root), "show", f"{base}:./budgets.json"],
             check=True, capture_output=True, text=True,
         ).stdout
         old, new = json.loads(old_text), json.loads((root / "budgets.json").read_text(encoding="utf-8"))
@@ -193,7 +208,10 @@ def check_budget_loosening(root: Path, base: str | None, event: dict) -> list[Pr
     loosened = []
     new_t = thresholds(new)
     for key, (direction, old_v) in thresholds(old).items():
-        if key not in new_t or not isinstance(old_v, (int, float)):
+        if key not in new_t:
+            loosened.append(f"{key}: removed")
+            continue
+        if not isinstance(old_v, (int, float)):
             continue
         new_v = new_t[key][1]
         if not isinstance(new_v, (int, float)):
@@ -240,24 +258,44 @@ def check_pins(root: Path) -> list[Problem]:
             m = re.match(r"^-?\s*(?:image|container):\s*['\"]?([^'\"\s{}]+)['\"]?$", line)
             if m and not DIGEST_RE.search(m.group(1)):
                 problems.append(Problem("DEP-7", f"container image `{m.group(1)}` is not pinned by @sha256: digest", rel, i))
-    for df in iter_files(root, ["**/Dockerfile", "**/*.Dockerfile", "**/Containerfile"]):
+    for df in iter_files(root, ["**/Dockerfile", "**/Dockerfile.*", "**/*.Dockerfile", "**/Containerfile", "**/Containerfile.*"]):
         rel = str(df.relative_to(root))
         stages: set[str] = set()
+        args: dict[str, str] = {}
         for i, raw in enumerate(df.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            a = re.match(r"(?i)^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)", raw)
+            if a:
+                args[a.group(1)] = a.group(2).strip("'\"")
+                continue
             m = re.match(r"(?i)^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", raw)
             if not m:
                 continue
-            image, stage = m.group(1), m.group(2)
-            if image.lower() != "scratch" and image not in stages and "$" not in image and not DIGEST_RE.search(image):
+            image = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
+            stage = m.group(2)
+            if image.lower() == "scratch" or image.lower() in stages or DIGEST_RE.search(image):
+                pass
+            elif "$" in image:
+                problems.append(Problem("DEP-7", f"base image `{image}` comes from a build argument with no default; "
+                                                 "give the ARG a digest-pinned default", rel, i))
+            else:
                 problems.append(Problem("DEP-7", f"base image `{image}` is not pinned by @sha256: digest", rel, i))
             if stage:
-                stages.add(stage)
-    for cf in iter_files(root, ["**/docker-compose*.yml", "**/docker-compose*.yaml", "**/compose*.yml", "**/compose*.yaml"]):
+                stages.add(stage.lower())
+    manifests = []
+    for f in iter_files(root, ["**/*.yml", "**/*.yaml"]):
+        if f.parts[len(root.parts):][:2] == (".github", "workflows") or f.name in ("action.yml", "action.yaml"):
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        is_compose = re.match(r"(docker-)?compose", f.name) is not None
+        is_k8s = re.search(r"(?m)^apiVersion:", text) and re.search(r"(?m)^kind:", text)
+        if is_compose or is_k8s:
+            manifests.append((f, text))
+    for cf, text in manifests:
         rel = str(cf.relative_to(root))
-        for i, raw in enumerate(cf.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            m = re.match(r"^\s*image:\s*['\"]?([^'\"\s]+)", raw)
-            if m and "$" not in m.group(1) and not DIGEST_RE.search(m.group(1)):
-                problems.append(Problem("DEP-7", f"compose image `{m.group(1)}` is not pinned by @sha256: digest", rel, i))
+        for i, raw in enumerate(text.splitlines(), 1):
+            m = re.match(r"^\s*-?\s*image:\s*['\"]?([^'\"\s]+)", raw)
+            if m and "$" not in m.group(1) and "{{" not in m.group(1) and not DIGEST_RE.search(m.group(1)):
+                problems.append(Problem("DEP-7", f"deployment image `{m.group(1)}` is not pinned by @sha256: digest", rel, i))
     return problems
 
 
@@ -276,14 +314,41 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
                              check=True, capture_output=True, text=True, timeout=300).stdout
     except (OSError, subprocess.SubprocessError) as e:
         return [Problem("WEB-1", f"could not resolve the browser list with npx browserslist: {e}")]
-    matrix = root / "docs" / "capability-matrix.md"
-    text = matrix.read_text(encoding="utf-8", errors="replace") if matrix.is_file() else ""
-    missing = [b for b in (l.strip() for l in out.splitlines()) if b and b not in text]
-    if missing:
-        shown = ", ".join(missing[:8]) + (f" and {len(missing) - 8} more" if len(missing) > 8 else "")
-        return [Problem("WEB-1", f"browserslist now resolves to browsers the capability matrix does not list: {shown}. "
-                                  "Re-check the matrix and update its resolved browser list", "docs/capability-matrix.md")]
+    resolved = {l.strip() for l in out.splitlines() if l.strip()}
+    recorded = recorded_browsers(root / "docs" / "capability-matrix.md")
+    if recorded is None:
+        return [Problem("WEB-1", "the capability matrix has no resolved browser list (a fenced block after the "
+                                  "`Resolved browser list` line)", "docs/capability-matrix.md")]
+    added, dropped = sorted(resolved - recorded), sorted(recorded - resolved)
+    if added or dropped:
+        def show(xs):
+            return ", ".join(xs[:8]) + (f" and {len(xs) - 8} more" if len(xs) > 8 else "")
+        parts = ([f"now includes {show(added)}"] if added else []) + ([f"no longer includes {show(dropped)}"] if dropped else [])
+        return [Problem("WEB-1", "the resolved browser list differs from the one in the capability matrix: it "
+                                  + "; it ".join(parts) + ". Re-check the matrix and record the new list",
+                        "docs/capability-matrix.md")]
     return []
+
+
+def recorded_browsers(matrix: Path) -> set[str] | None:
+    """The fenced block that follows the `Resolved browser list` line in the capability matrix."""
+    if not matrix.is_file():
+        return None
+    lines = matrix.read_text(encoding="utf-8", errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"(?i)^\s*\**resolved browser list", line):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith(("```", "~~~")):
+                if lines[j].strip() and not lines[j].lstrip().startswith(("<", "(")):
+                    return None
+                j += 1
+            block = []
+            for line2 in lines[j + 1:]:
+                if line2.strip().startswith(("```", "~~~")):
+                    return {b.strip() for b in block if b.strip()}
+                block.append(line2)
+            return None
+    return None
 
 
 def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
@@ -314,16 +379,37 @@ def vuln_gate(report_path: Path, tier: str | None) -> tuple[list[Problem], list[
                 ids = ", ".join(group.get("aliases") or group.get("ids") or [])
                 raw = group.get("max_severity") or ""
                 try:
-                    score = float(raw)
+                    high = float(raw) >= 7.0
+                    shown = f"CVSS {raw}"
                 except ValueError:
-                    score = None
-                label = f"{info.get('name')} {info.get('version')}: {ids} (CVSS {raw or 'unknown'})"
-                p = Problem("Gov §5", f"known-vulnerable dependency {label}", rel)
-                if n >= 2 and score is not None and score >= 7.0:
+                    levels = {str((v.get("database_specific") or {}).get("severity", "")).upper()
+                              for v in pkg.get("vulnerabilities", []) if v.get("id") in set(group.get("ids", []))}
+                    levels.discard("")
+                    # No CVSS score: use the advisory database's rating; with no rating at all, assume the worst.
+                    high = bool(levels & {"HIGH", "CRITICAL"}) or not levels
+                    shown = f"severity {', '.join(sorted(levels)) or 'unknown'}"
+                p = Problem("Gov §5", f"known-vulnerable dependency {info.get('name')} {info.get('version')}: {ids} ({shown})", rel)
+                if n >= 2 and high:
                     blocking.append(p)
                 else:
                     warnings.append(p)
     return blocking, warnings
+
+
+def license_gate(report_path: Path) -> list[Problem]:
+    """Section 5, license compliance: every package license outside license-allowlist.txt."""
+    data = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
+    problems = []
+    for result in data.get("results", []):
+        source = (result.get("source") or {}).get("path", "")
+        rel = os.path.relpath(source) if source else None
+        for pkg in result.get("packages", []):
+            bad = pkg.get("license_violations") or []
+            if bad:
+                info = pkg.get("package", {})
+                problems.append(Problem("Gov §5", f"{info.get('name')} {info.get('version')} has license "
+                                                   f"{', '.join(bad)}, which license-allowlist.txt does not allow", rel))
+    return problems
 
 
 def report(problems: list[Problem], level: str = "error") -> None:
@@ -350,7 +436,7 @@ def report(problems: list[Problem], level: str = "error") -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["conformance", "tier", "header", "vulns", "pins"])
+    ap.add_argument("command", choices=["conformance", "tier", "header", "vulns", "licenses", "pins"])
     ap.add_argument("--report", type=Path, help="osv-scanner JSON report, for `vulns`")
     ap.add_argument("--root", default=".", type=Path)
     ap.add_argument("--base", help="git ref of the PR base, to detect loosened budgets")
@@ -370,6 +456,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pins":
         problems = check_pins(root)
+        report(problems)
+        return 1 if problems else 0
+    if args.command == "licenses":
+        problems = license_gate(args.report)
         report(problems)
         return 1 if problems else 0
     if args.command == "vulns":

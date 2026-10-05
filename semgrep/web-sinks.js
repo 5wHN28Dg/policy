@@ -38,3 +38,17 @@ window.open("/help", "_blank");
 const bad = "javascript:alert(1)";
 // ok: web-10-dynamic-url-sink
 location.replace("/login");
+// ruleid: web-10-dynamic-url-sink
+window.location.assign(next);
+// ruleid: web-10-dynamic-url-sink
+window.location.replace(next);
+// ruleid: web-10-dynamic-url-sink
+document.location = next;
+// ok: web-10-dynamic-url-sink
+window.location.replace("/done");
+// ruleid: web-10-dynamic-url-sink
+btn.setAttribute("formaction", next);
+// ruleid: web-9-html-sink-assignment
+frame.setAttribute("srcdoc", page);
+// ok: web-9-html-sink-assignment
+frame.setAttribute("srcdoc", "<p>static</p>");
