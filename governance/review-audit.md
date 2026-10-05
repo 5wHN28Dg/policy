@@ -224,7 +224,20 @@ Any departure from this policy is a written, time-limited exception; an unwritte
 
 Not eligible for exception: Critical findings, secrets committed to the repository (rotate them; deleting the commit is not enough), and disabling branch protection.
 
-A project that uses the policy's CI records each exception as an entry in `policy-exceptions.json` at its root ([example](../templates/policy-exceptions.example.json)): the rule ID, the files it covers (required when the rule is a section of this document, which spans several checks), the finding, the reason, the compensating control, who accepted it, the dates it was written, accepted and expires, the renewal count, and a link to its issue. Until the expiry, CI reports a failure the entry covers as a warning that names it; after the expiry, the failure blocks again. A line-level suppression links its entry with `exception: <link>`. CI refuses entries that break this section: an expiry more than 90 days after acceptance, an exception for secrets, or (Section 11) acceptance less than a day after writing. It never applies one to a Critical vulnerability or to the policy's own controls (suppression markers, the secrets-scan configuration, the baseline period).
+A project that uses the policy's CI records each exception as an entry in `policy-exceptions.json` at its root ([example](../templates/policy-exceptions.example.json)). An entry gives:
+
+- the rule: a standard's rule ID (`WEB-8`), or, for a check of this document, the exact label CI reports (`Gov §5 (GHSA-xxxx)`, `Gov §5 (lockfile)`), never a whole section;
+- the files it covers, as globs in which `*` stays within one directory (required for checks of this document; a glob that would match any file is refused);
+- the finding, the reason, the compensating control, who accepted it, the dates it was written, accepted and expires, the renewal count, and a link to its issue.
+
+Until the expiry, CI reports a failure the entry covers as a warning that names it; after the expiry, CI fails until the finding is fixed and the entry removed, or the entry is renewed. A line-level suppression points to its entry with `exception: <the entry's link>`. CI also enforces the rest of this section:
+
+- the expiry is at most 90 days after acceptance;
+- an entry takes effect 24 hours after the commit that first added it (Section 11's wait, applied to every project);
+- a PR that adds or changes an entry names it in an `Exception change: <id>` line in its description;
+- a renewal raises the count by one, and a lapsed exception is renewed under its own id, not re-added under a new one.
+
+An entry never covers a Critical finding, a secret (a gitleaks allow marker can't rest on an exception), or the policy's own controls: suppression markers, the secrets-scan configuration, the baseline period, and this file.
 
 ## 11. Solo-developer adaptations
 

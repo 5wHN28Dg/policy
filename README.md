@@ -56,7 +56,7 @@ The policy ships the CI that checks it. A project copies [templates/ci/policy.ym
 | [sbom](actions/sbom/action.yml) | Section 5 SBOM (Syft, CycloneDX) on release tags | No; uploads an artifact |
 | [claude-review](actions/claude-review/action.yml) | A fresh-context Claude review of each PR against Section 6 and the standards, with inline comments and one summary comment | No; advisory |
 
-A failure that a written Section 10 exception covers is reported as a warning naming it, until the exception expires. Exceptions live in `policy-exceptions.json` ([example](templates/policy-exceptions.example.json)); the conformance, static-analysis, dependency and license checks all read it.
+A failure that a written Section 10 exception covers is reported as a warning naming it, until the exception expires. Exceptions live in `policy-exceptions.json` ([example](templates/policy-exceptions.example.json)); the conformance, static-analysis, dependency and license checks all read it. An entry takes effect 24 hours after it is first committed, and a PR that adds or changes one needs an `Exception change: <id>` line; see [Section 10](governance/review-audit.md#10-exceptions-and-risk-acceptance) for the rest.
 
 Everything else a rule's Check names (records, matrices, manual checks, threat-model content) is for the PR review and the release audit.
 
