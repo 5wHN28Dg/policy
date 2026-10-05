@@ -521,11 +521,11 @@ class GitleaksConfigTests(unittest.TestCase):
             problems = pc.check_gitleaks_config(root, base, {"pull_request": {"body": "Adds vectors."}})
             self.assertIn("Secrets config change", problems[0].message)
             self.assertEqual(pc.check_gitleaks_config(root, base, {"pull_request": {"body": "Secrets config change: test vectors"}}), [])
-            write(root, "app.py", "KEY = 'x'  # gitleaks:allow\n")
+            write(root, "app.py", f"KEY = 'x'  # {pc.ALLOW_MARKER}\n")
             subprocess.run(["git", "-C", d, "add", "."], check=True)
             subprocess.run(["git", "-C", d, "commit", "-qm", "allow"], check=True, env=env)
             problems = pc.check_gitleaks_config(root, base, {"pull_request": {"body": "x"}})
-            self.assertIn("gitleaks:allow", problems[0].message)
+            self.assertIn(pc.ALLOW_MARKER, problems[0].message)
 
     def test_toml_forms(self):
         for text, ok in (("extend.useDefault = true\n", True), ("[extend] # defaults\nuseDefault = true\n", True),
@@ -642,7 +642,7 @@ class ReviewFixTests(unittest.TestCase):
                 "el.innerHTML = x; // nosemgrep",
                 "el.innerHTML = y; // nosemgrep: web-9-html-sink-assignment -- policy-fp: constant markup (https://github.com/o/r/pull/3#r1)",
                 "el.innerHTML = z; // nosemgrep -- exception https://github.com/o/r/issues/9",
-                "const k = 'x'; // gitleaks:allow",
+                f"const k = 'x'; // {pc.ALLOW_MARKER}",
             ]))
             write(Path(d), "docs/notes.md", "use // nosemgrep sparingly\n")
             self.assertEqual([p.line for p in pc.check_markers(Path(d))], [1, 4])

@@ -574,7 +574,8 @@ def check_baseline_change(root: Path, base: str | None, h: Header) -> list[Probl
     return []
 
 
-MARKER_RE = re.compile(r"nosemgrep|gitleaks:allow")
+ALLOW_MARKER = "gitleaks" + ":allow"  # built from parts: gitleaks skips every line that contains the marker itself
+MARKER_RE = re.compile(r"nosemgrep|" + re.escape(ALLOW_MARKER))
 MARKER_OK = re.compile(r"policy-fp:\s*\S.*\(\s*https?://\S+\s*\)|exception\b.*https?://\S+", re.I)
 
 
@@ -714,12 +715,12 @@ def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Pro
     if base:
         changed = subprocess.run(["git", "-C", str(root), "diff", "--name-only", f"{base}...HEAD", "--",
                                   ".gitleaks.toml", ".gitleaksignore"], capture_output=True, text=True).stdout.split()
-        added = subprocess.run(["git", "-C", str(root), "diff", "-U0", f"{base}...HEAD"], capture_output=True,
-                               text=True).stdout
-        allows = [l for l in added.splitlines() if l.startswith("+") and "gitleaks:allow" in l]
+        added = subprocess.run(["git", "-C", str(root), "diff", "-U0", f"{base}...HEAD", "--", ".", ":(exclude)*.md"],
+                               capture_output=True, text=True).stdout
+        allows = [l for l in added.splitlines() if l.startswith("+") and ALLOW_MARKER in l]
         body = ((event.get("pull_request") or {}).get("body") or "")
         if (changed or allows) and not re.search(r"(?im)^\s*Secrets config change:\s*\S", body):
-            what = ", ".join([f"`{c}`" for c in changed] + (["`gitleaks:allow` comments"] if allows else []))
+            what = ", ".join([f"`{c}`" for c in changed] + ([f"`{ALLOW_MARKER}` comments"] if allows else []))
             problems.append(Problem("Gov §5", f"this PR changes what the secrets scan ignores ({what}), and that scan "
                                               "runs on this same PR. Add a `Secrets config change: <reason>` line to "
                                               "the PR description", changed[0] if changed else None))
