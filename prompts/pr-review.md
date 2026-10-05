@@ -32,15 +32,22 @@ against what the author meant.
 3. Every standard rule the change touches, cited by ID. In particular:
    - a new direct dependency needs the DEP-1 justification, and from T2 the DEP-2 record;
    - a loosened budgets.json threshold needs a stated reason;
-   - a change that adds a network listener, users, sensitive data or control of equipment re-checks the tier.
+   - a change that adds a network listener, users, sensitive data or control of equipment re-checks the tier;
+   - a build script that starts fetching third-party code (a tarball, a git checkout, an SDK) adds it to
+     `pinned-sources.cdx.json` (DEP-8);
+   - on T3, a change that touches a trust boundary links the adversarial pass of the fresh-context review in its
+     description (Section 11);
+   - a new `nosemgrep`, `gitleaks:allow` or `policy-fp` marker carries a reason and a link to the review that
+     confirmed it, and that review is not this PR's author (Section 5).
 4. Whether the declared tier still fits Section 3, given what the change does.
 5. For a project with an HTML UI (`Type:` web, webview or engine-bundling): whether the change affects the CSP (WEB-7,
    WEB-8), and whether it adds inline scripts or inline event handlers that a strict CSP would block.
 
 Stay inside the diff and the code it affects. Don't report style preferences. Don't repeat what CI already reports
 (the conformance, secrets, dependency and static-analysis checks) unless the change disables or weakens one of them.
-A problem that existed before this PR, or that the PR itself documents as known, is never "Blocks merge: yes"; list
-it with "No" if it matters for the change.
+A problem that existed before this PR is never "Blocks merge: yes"; list it with "No" if it matters for the change. A
+problem this diff introduces is judged on its own: a note in the PR description doesn't waive it, only a linked
+Section 10 exception does.
 
 ## Output
 1. For each problem tied to a line, post one inline comment on that line with the inline-comment tool. Start it with

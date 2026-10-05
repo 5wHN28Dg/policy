@@ -66,23 +66,109 @@ rules:
     patterns:
       - pattern-either:
           - pattern: $EL.href = $V
+          # src is a sink unless the element is provably an image or media element (WEB-10).
           - patterns:
-              - pattern-either:
-                  - pattern-inside: |
-                      $EL = document.createElement("$TAG");
-                      ...
-                  - pattern-inside: |
-                      const $EL = document.createElement("$TAG");
-                      ...
-                  - pattern-inside: |
-                      let $EL = document.createElement("$TAG");
-                      ...
-              - metavariable-regex:
-                  metavariable: $TAG
-                  regex: (?i)^(script|iframe|frame|embed)$
               - pattern-either:
                   - pattern: $EL.src = $V
                   - pattern: $EL.setAttribute("src", $V)
+              - pattern-not-inside: |
+                  $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("img");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("audio");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("video");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("source");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("track");
+                  ...
+              - pattern-not-inside: |
+                  $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  const $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  let $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  var $EL = document.createElement("picture");
+                  ...
+              - pattern-not-inside: |
+                  $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  const $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  let $EL = new Image(...);
+                  ...
+              - pattern-not-inside: |
+                  var $EL = new Image(...);
+                  ...
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      $EL = document.createElement("object");
+                      ...
+                  - pattern-inside: |
+                      const $EL = document.createElement("object");
+                      ...
+                  - pattern-inside: |
+                      let $EL = document.createElement("object");
+                      ...
+              - pattern-either:
+                  - pattern: $EL.data = $V
+                  - pattern: $EL.setAttribute("data", $V)
           - pattern: $EL.action = $V
           - pattern: $EL.formAction = $V
           - pattern: location.href = $V
@@ -109,9 +195,9 @@ rules:
       - pattern-not: $EL.$P = $U.safeUrl(...)
       - pattern-not: $L.$M($U.safeUrl(...), ...)
       - pattern-not: $EL.setAttribute($A, $U.safeUrl(...))
-      # URLs the page makes itself from its own data are not external data (WEB-10).
-      - pattern-not: $X = URL.createObjectURL(...)
-      - pattern-not: $X = $C.toDataURL(...)
+      # A blob: or data: URL the page made from its own data is not external data (WEB-10), but only a reviewer can
+      # tell where the data came from (a blob of fetched HTML in an iframe runs as this origin), so such sites are
+      # marked policy-fp after review instead of being exempted here.
 
   - id: web-10-javascript-url-literal
     languages: [javascript, typescript]

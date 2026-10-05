@@ -30,7 +30,7 @@ Tiers: T0 projects follow only the governance rules for T0 (a secrets scan); the
 
    ```
    Tier: T2
-   Policy: v1.2
+   Policy: v2.0
    Type: web, native
    Users: none
    Baseline: until 2026-12-31
@@ -52,7 +52,7 @@ The policy ships the CI that checks it. A project copies [templates/ci/policy.ym
 | [conformance](actions/conformance/action.yml) | README header and baseline period; required files per tier; `budgets.json` against the schema; loosened budgets without a `Budget change:` line in the PR; `DEP-7` pins; manifests without lockfiles and unpinned requirements (Section 5); `pinned-sources.cdx.json` (`DEP-8`); a CSP exists and allows no inline or eval scripts, as far as the repository shows (`WEB-7`, `WEB-8`); the `WEB-1` resolved browser list | Yes; missing artifacts are warnings during a baseline period |
 | [secrets](actions/secrets/action.yml) | Section 5 secrets in code and history (gitleaks). A project's `.gitleaks.toml` must extend the default rules, and a PR that changes it needs a `Secrets config change:` line | Yes, every tier |
 | [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`), including the sources in `pinned-sources.cdx.json`. Says so when it matched nothing | Every severity on T3; High and Critical on T2; warnings on T1 |
-| [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1, in `.js`/`.ts` files and in the inline `<script>` blocks of HTML files; inline event handlers as `WEB-7` warnings; Semgrep's default ruleset from full T2 | The policy's rules; default-ruleset results rated High confidence or above that are not audit rules. Everything else is a warning |
+| [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1, in `.js`/`.ts` files and in the inline `<script>` blocks of HTML files; inline event handlers as `WEB-7` warnings; Semgrep's default ruleset from full T2 | The policy's rules; default-ruleset results of severity ERROR, HIGH or CRITICAL that the rule doesn't rate low-confidence and that aren't audit rules (Section 5). Everything else is a warning |
 | [sbom](actions/sbom/action.yml) | Section 5 SBOM (Syft, CycloneDX) on release tags | No; uploads an artifact |
 | [claude-review](actions/claude-review/action.yml) | A fresh-context Claude review of each PR against Section 6 and the standards, with inline comments and one summary comment | No; advisory |
 
@@ -61,7 +61,7 @@ Everything else a rule's Check names (records, matrices, manual checks, threat-m
 Known limits:
 
 - OSV matches few C and C++ sources, so `DEP-8` sources get their advisories checked by hand at each release audit, whatever the scan says.
-- The CSP check sees only what is in the repository. A CSP set by hosting outside it is checked by the PR review and the release audit.
+- The CSP check sees only what is in the repository, line by line: a directive split across lines is missed. A CSP set outside the repository is declared with a `CSP: set by <where>` line in `docs/threat-model.md`, and the PR review and the release audit check it there.
 - Inline event handlers (`onclick=`) are flagged as `WEB-7` warnings, but the JavaScript inside them is not scanned for `WEB-9`/`WEB-10` sinks.
 - Semgrep's `p/default` ruleset, used from full T2, is fetched from the Semgrep registry at run time and is not versioned, so a registry update can fail a build with no change in the project. Treat such a failure as a new finding, not a broken build.
 

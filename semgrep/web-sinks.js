@@ -17,12 +17,12 @@ el.textContent = userInput;
 
 // ruleid: web-10-dynamic-url-sink
 a.href = params.get("next");
-// ok: web-10-dynamic-url-sink
-img.src = params.get("pic");
-// ok: web-10-dynamic-url-sink
-a.href = URL.createObjectURL(new Blob([data]));
-// ok: web-10-dynamic-url-sink
-img.src = canvas.toDataURL("image/png");
+// ruleid: web-10-dynamic-url-sink
+frame.src = params.get("u");
+// ruleid: web-10-dynamic-url-sink
+document.querySelector("iframe").src = params.get("u");
+// ruleid: web-10-dynamic-url-sink
+a.href = URL.createObjectURL(blob);
 // ok: web-10-dynamic-url-sink
 a.href = "/home";
 // ok: web-10-dynamic-url-sink
@@ -69,4 +69,18 @@ function loadScript(u) {
   const im = document.createElement("img");
   // ok: web-10-dynamic-url-sink
   im.src = u;
+  const pic = new Image();
+  // ok: web-10-dynamic-url-sink
+  pic.src = u;
+  const o = document.createElement("object");
+  // ruleid: web-10-dynamic-url-sink
+  o.data = u;
+  const v = document.createElement("video");
+  // ok: web-10-dynamic-url-sink
+  v.setAttribute("src", u);
+}
+async function viaBlob(p) {
+  const fr = document.createElement("iframe");
+  // ruleid: web-10-dynamic-url-sink
+  fr.src = URL.createObjectURL(await (await fetch(p.get("u"))).blob());
 }

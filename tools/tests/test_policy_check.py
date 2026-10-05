@@ -423,12 +423,12 @@ class LockfileTests(unittest.TestCase):
             return pc.check_lockfiles(Path(d), pc.Header(tier=tier, types=["native"]))
 
     def test_gradle_and_npm_without_lockfiles(self):
-        problems = self.check({"android/app/build.gradle.kts": "plugins {}\n",
+        problems = self.check({"android/app/build.gradle.kts": "plugins {}\ndependencies {\n  implementation(\"a:b:1\")\n}\n",
                                "web/package.json": '{"dependencies": {"x": "1"}}',
                                "ok/package.json": '{"dependencies": {"x": "1"}}', "ok/package-lock.json": "{}",
                                "empty/package.json": '{"name": "no-deps"}'})
         self.assertEqual(sorted(p.file for p in problems), ["android/app/build.gradle.kts", "web/package.json"])
-        self.assertTrue(all(p.level == "error" and p.artifact for p in problems))
+        self.assertTrue(all(p.level == "error" and not p.artifact for p in problems))
 
     def test_gradle_lockfile_anywhere_counts(self):
         self.assertEqual(self.check({"android/app/build.gradle.kts": "x", "android/gradle.lockfile": "x"}), [])
@@ -438,7 +438,7 @@ class LockfileTests(unittest.TestCase):
         self.assertEqual([p.line for p in problems], [1, 5])
 
     def test_t1_warns(self):
-        problems = self.check({"build.gradle": "x"}, tier="T1")
+        problems = self.check({"build.gradle": "dependencies {\n}\n"}, tier="T1")
         self.assertEqual([p.level for p in problems], ["warning"])
 
 
@@ -452,7 +452,7 @@ class PinnedSourcesTests(unittest.TestCase):
         good = {"bomFormat": "CycloneDX", "specVersion": "1.5", "components": [{
             "name": "zlib", "version": "1.3.1", "licenses": [{"license": {"id": "Zlib"}}],
             "externalReferences": [{"type": "distribution", "url": "https://zlib.net/zlib-1.3.1.tar.gz",
-                                    "hashes": [{"alg": "SHA-256", "content": "ab"}]}]}]}
+                                    "hashes": [{"alg": "SHA-256", "content": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"}]}]}]}
         self.assertEqual(self.check(good), [])
 
     def test_commit_as_version_counts_as_pin(self):
@@ -463,7 +463,7 @@ class PinnedSourcesTests(unittest.TestCase):
     def test_missing_fields(self):
         problems = self.check({"bomFormat": "CycloneDX", "components": [{"name": "sqlite", "version": "3.46"}]})
         self.assertEqual(len(problems), 1)
-        for word in ("URL", "pinned hash", "licenses"):
+        for word in ("URL", "SHA-256", "licenses"):
             self.assertIn(word, problems[0].message)
 
     def test_not_cyclonedx(self):
@@ -483,7 +483,7 @@ class CspTests(unittest.TestCase):
         self.assertEqual(self.check({"main.kt": "x"}, types=("native",)), [])
 
     def test_unsafe_inline_in_script_directive(self):
-        problems = self.check({"server/headers.py": 'CSP = "default-src \'self\'; script-src \'self\' \'unsafe-inline\'"\n'})
+        problems = self.check({"server/headers.py": 'HEADERS = {"Content-Security-Policy": "default-src \'self\'; script-src \'self\' \'unsafe-inline\'"}\n'})
         self.assertEqual([(p.rule, p.line) for p in problems], [("WEB-7", 1)])
 
     def test_unsafe_inline_only_in_style_is_fine(self):
@@ -514,10 +514,32 @@ class GitleaksConfigTests(unittest.TestCase):
             write(root, "README.md", "x")
             subprocess.run(["git", "-C", d, "add", "."], check=True)
             subprocess.run(["git", "-C", d, "commit", "-qm", "base"], check=True, env=env)
+            base = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
             write(root, ".gitleaks.toml", "[extend]\nuseDefault = true\n")
-            problems = pc.check_gitleaks_config(root, "HEAD", {"pull_request": {"body": "Adds vectors."}})
+            subprocess.run(["git", "-C", d, "add", "."], check=True)
+            subprocess.run(["git", "-C", d, "commit", "-qm", "config"], check=True, env=env)
+            problems = pc.check_gitleaks_config(root, base, {"pull_request": {"body": "Adds vectors."}})
             self.assertIn("Secrets config change", problems[0].message)
-            self.assertEqual(pc.check_gitleaks_config(root, "HEAD", {"pull_request": {"body": "Secrets config change: test vectors"}}), [])
+            self.assertEqual(pc.check_gitleaks_config(root, base, {"pull_request": {"body": "Secrets config change: test vectors"}}), [])
+            write(root, "app.py", "KEY = 'x'  # gitleaks:allow\n")
+            subprocess.run(["git", "-C", d, "add", "."], check=True)
+            subprocess.run(["git", "-C", d, "commit", "-qm", "allow"], check=True, env=env)
+            problems = pc.check_gitleaks_config(root, base, {"pull_request": {"body": "x"}})
+            self.assertIn("gitleaks:allow", problems[0].message)
+
+    def test_toml_forms(self):
+        for text, ok in (("extend.useDefault = true\n", True), ("[extend] # defaults\nuseDefault = true\n", True),
+                         ("extend = { useDefault = true }\n", True), ("[extend]\nuseDefault = false\n", False),
+                         ("[extend\n", None)):
+            with tempfile.TemporaryDirectory() as d:
+                write(Path(d), ".gitleaks.toml", text)
+                problems = pc.check_gitleaks_config(Path(d), None, {})
+                if ok:
+                    self.assertEqual(problems, [], text)
+                elif ok is False:
+                    self.assertIn("useDefault", problems[0].message, text)
+                else:
+                    self.assertIn("not valid TOML", problems[0].message, text)
 
 
 class InlineScriptTests(unittest.TestCase):
@@ -579,3 +601,107 @@ class SastGateTests(unittest.TestCase):
             r2 = self.report(d, [self.result("x.web-9-html-sink-assignment", copy, 9, "ERROR", **{"policy-rule": "WEB-9"})])
             problems = pc.sast_gate([r1, r2], {copy: "admin.html"})
             self.assertEqual([(p.file, p.line) for p in problems], [("admin.html", 9)])
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Behaviour added after the PR #2 review."""
+
+    def git(self, d, *args):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        return subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, text=True, env=env).stdout.strip()
+
+    def test_baseline_cannot_be_added_late_or_extended(self):
+        soon = (datetime.date.today() + datetime.timedelta(days=20)).isoformat()
+        later = (datetime.date.today() + datetime.timedelta(days=60)).isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            write(Path(d), "README.md", "Tier: T2\nPolicy: v2.0\nType: native\n")
+            self.git(d, "add", "."); self.git(d, "commit", "-qm", "adopted")
+            base = self.git(d, "rev-parse", "HEAD")
+            write(Path(d), "README.md", f"Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until {soon}\n")
+            msg = pc.check_baseline_change(Path(d), base, pc.read_header(Path(d)))[0].message
+            self.assertIn("already follows", msg)
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            write(Path(d), "README.md", f"Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until {soon}\n")
+            self.git(d, "add", "."); self.git(d, "commit", "-qm", "adopted")
+            base = self.git(d, "rev-parse", "HEAD")
+            write(Path(d), "README.md", f"Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until {later}\n")
+            self.assertIn("never moved later", pc.check_baseline_change(Path(d), base, pc.read_header(Path(d)))[0].message)
+        with tempfile.TemporaryDirectory() as d:  # the adoption PR itself: no Policy line before
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            write(Path(d), "README.md", "# App\n")
+            self.git(d, "add", "."); self.git(d, "commit", "-qm", "before")
+            base = self.git(d, "rev-parse", "HEAD")
+            write(Path(d), "README.md", f"Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until {soon}\n")
+            self.assertEqual(pc.check_baseline_change(Path(d), base, pc.read_header(Path(d))), [])
+
+    def test_suppression_markers_need_policy_fp_or_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "a.js", "\n".join([
+                "el.innerHTML = x; // nosemgrep",
+                "el.innerHTML = y; // nosemgrep: web-9-html-sink-assignment -- policy-fp: constant markup (https://github.com/o/r/pull/3#r1)",
+                "el.innerHTML = z; // nosemgrep -- exception https://github.com/o/r/issues/9",
+                "const k = 'x'; // gitleaks:allow",
+            ]))
+            write(Path(d), "docs/notes.md", "use // nosemgrep sparingly\n")
+            self.assertEqual([p.line for p in pc.check_markers(Path(d))], [1, 4])
+
+    def test_lockfile_in_ancestor_and_pyproject_without_deps(self):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in {"package-lock.json": "{}", "packages/a/package.json": '{"dependencies": {"x": "1"}}',
+                              "pyproject.toml": "[tool.ruff]\nline-length = 100\n",
+                              "svc/pyproject.toml": "[project]\nname = 'x'\ndependencies = ['requests']\n",
+                              "requirements.txt": "a==1.2\nb==2.*\nc @ https://x/c.whl\n"}.items():
+                write(Path(d), rel, text)
+            problems = pc.check_lockfiles(Path(d), pc.Header(tier="T2", types=["service"]))
+            self.assertEqual(sorted((p.file, p.line) for p in problems),
+                             [("requirements.txt", 2), ("svc/pyproject.toml", None)])
+        with tempfile.TemporaryDirectory() as d:  # unparsable JSON doesn't crash, and still needs a lockfile
+            write(Path(d), "web/package.json", "{ // jsonc\n}")
+            self.assertEqual([p.file for p in pc.check_lockfiles(Path(d), pc.Header(tier="T2"))], ["web/package.json"])
+
+    def test_csp_threat_model_line_comments_and_default_src(self):
+        def check(files):
+            with tempfile.TemporaryDirectory() as d:
+                for rel, text in files.items():
+                    write(Path(d), rel, text)
+                return [p.rule for p in pc.check_csp(Path(d), pc.Header(tier="T2", types=["web"]))]
+        self.assertEqual(check({"docs/threat-model.md": "- CSP: set by the Cloudflare _headers of the host\n"}), [])
+        self.assertEqual(check({"a.js": "const h = 'Content-Security-Policy';\n// never use script-src 'unsafe-inline'\n"}), [])
+        self.assertEqual(check({"a.js": "csp = ['Content-Security-Policy',\n \"default-src 'self' 'unsafe-inline'\",\n \"script-src 'self'\"]\n"}), [])
+        self.assertEqual(check({"s.js": "helmet({ contentSecurityPolicy: { directives: { scriptSrc: [\"'self'\", \"'unsafe-eval'\"] } } })\n"}), ["WEB-7"])
+        self.assertEqual(check({"a.js": "// mentions script-src only\n"}), ["WEB-8"])
+
+    def test_inline_copies_follow_semgrepignore_and_data_attributes(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            write(Path(d), ".semgrepignore", "docs/\n")
+            write(Path(d), "docs/x.html", "<script>el.innerHTML = a;</script>")
+            write(Path(d), "app/y.html", "<script data-src=\"z\" data-type=\"q\">el.innerHTML = b;</script>")
+            self.assertEqual(list(pc.extract_inline(Path(d), Path(out)).values()), ["app/y.html"])
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            write(Path(d), "tests/t.html", "<script>el.innerHTML = a;</script>")  # Semgrep's defaults skip tests/
+            self.assertEqual(pc.extract_inline(Path(d), Path(out)), {})
+
+    def test_new_severity_scale_and_missing_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d) / "r.json"
+            r.write_text(json.dumps({"results": [
+                {"check_id": "a.b.rule", "path": "x.py", "start": {"line": 1},
+                 "extra": {"message": "m", "severity": "HIGH", "metadata": {"confidence": "MEDIUM"}}},
+                {"check_id": "a.b.rule2", "path": "x.py", "start": {"line": 2},
+                 "extra": {"message": "m", "severity": "MEDIUM", "metadata": {"confidence": "HIGH"}}}]}))
+            problems = pc.sast_gate([r, Path(d) / "missing.json"])
+            self.assertEqual([p.level for p in problems], ["error", "warning", "error"])
+            self.assertIn("missing", problems[2].message)
+
+    def test_release_test_to_ci_is_not_loosening(self):
+        old = json.loads(EXAMPLE_BUDGETS)
+        new = json.loads(EXAMPLE_BUDGETS)
+        new["native"]["android"]["measuredWhere"] = "ci"
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+            write(Path(d), "budgets.json", json.dumps(old))
+            self.git(d, "add", "."); self.git(d, "commit", "-qm", "b")
+            write(Path(d), "budgets.json", json.dumps(new))
+            self.assertEqual(pc.check_budget_loosening(Path(d), "HEAD", {}), [])

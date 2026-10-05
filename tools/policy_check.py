@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -226,6 +227,8 @@ def check_budget_loosening(root: Path, base: str | None, event: dict) -> list[Pr
     new_t = thresholds(new)
     for key, (direction, old_v) in thresholds(old).items():
         if key not in new_t:
+            if "@release-test." in key and key.replace("@release-test.", "@ci.") in new_t:
+                continue  # moving a metric into CI is tightening
             loosened.append(f"{key}: removed")
             continue
         if not isinstance(old_v, (int, float)):
@@ -398,6 +401,29 @@ LOCKFILES = [
 ]
 
 
+def skipped_path(rel: str) -> bool:
+    """Paths that are not the project's own manifests: vendored code, installed packages, test fixtures."""
+    parts = rel.split("/")
+    return any(p in ("node_modules", "vendor", "fixtures", "test", "tests", "__tests__") for p in parts[:-1])
+
+
+def declares_dependencies(f: Path, eco: str) -> bool:
+    """False for manifests that declare nothing to lock, which would only produce noise."""
+    text = f.read_text(encoding="utf-8", errors="replace")
+    if eco == "npm":
+        try:
+            data = json.loads(text or "{}")
+        except json.JSONDecodeError:
+            return True  # can't tell; let the lockfile question stand
+        return bool(data.get("dependencies") or data.get("devDependencies") or data.get("optionalDependencies"))
+    if eco == "Python" and f.name == "pyproject.toml":
+        return bool(re.search(r"(?m)^\s*(dependencies\s*=|\[project\.optional-dependencies\]|\[dependency-groups\]|"
+                              r"\[tool\.poetry\.(dev-)?dependencies\]|\[tool\.poetry\.group\.)", text))
+    if eco == "Gradle":
+        return re.search(r"(?m)^\s*dependencies\s*\{", text) is not None
+    return True
+
+
 def check_lockfiles(root: Path, h: Header) -> list[Problem]:
     """Section 5: dependencies are pinned by lockfile. A manifest without its lockfile is neither pinned nor scanned."""
     problems = []
@@ -406,32 +432,41 @@ def check_lockfiles(root: Path, h: Header) -> list[Problem]:
     names_by_dir: dict[Path, set[str]] = {}
     for f in files:
         names_by_dir.setdefault(f.parent, set()).add(f.name)
-    gradle_root_locks = any("gradle.lockfile" in names for names in names_by_dir.values())
+
+    def lock_found(f: Path, locks: tuple[str, ...], eco: str) -> bool:
+        # npm, pnpm, Yarn and Cargo workspaces lock at an ancestor; every other ecosystem locks beside the manifest.
+        d = f.parent
+        while True:
+            if any(l in names_by_dir.get(d, set()) for l in locks):
+                return True
+            if eco not in ("npm", "Cargo") or d == root or root not in d.parents:
+                return False
+            d = d.parent
+
     for f in files:
         rel = str(f.relative_to(root))
-        if "node_modules" in f.parts or "/vendor/" in f"/{rel}" or rel.startswith(("fixtures/", "test/", "tests/")):
+        if skipped_path(rel):
             continue
         for pattern, locks, eco in LOCKFILES:
-            if not fnmatch.fnmatch(f.name, pattern):
-                continue
-            here = names_by_dir.get(f.parent, set())
-            if any(l in here for l in locks) or (eco == "Gradle" and gradle_root_locks):
-                continue
-            if eco == "npm" and not json.loads(f.read_text(encoding="utf-8", errors="replace") or "{}").get(
-                    "dependencies") and not json.loads(f.read_text(encoding="utf-8", errors="replace") or "{}").get("devDependencies"):
+            if not fnmatch.fnmatch(f.name, pattern) or lock_found(f, locks, eco) or not declares_dependencies(f, eco):
                 continue
             hint = "enable dependency locking (`./gradlew dependencies --write-locks`)" if eco == "Gradle" else \
                    f"commit its lockfile ({', '.join(locks[:2])})"
             problems.append(Problem("Gov §5", f"{eco} manifest without a lockfile: its dependencies are neither pinned "
-                                              f"nor scanned; {hint}", rel, level=level, artifact=True))
+                                              f"nor scanned; {hint}", rel, level=level))
     for f in files:
-        if re.fullmatch(r"requirements[\w.-]*\.txt", f.name) and "node_modules" not in f.parts:
-            for i, raw in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                line = raw.split("#")[0].strip()
-                if not line or line.startswith(("-", "--")) or "==" in line or "@" in line:
-                    continue
-                problems.append(Problem("Gov §5", f"`{line}` is not pinned to an exact version (`==`); the scanner skips "
-                                                  "unpinned requirements", str(f.relative_to(root)), i, level=level, artifact=True))
+        rel = str(f.relative_to(root))
+        if not re.fullmatch(r"requirements[\w.-]*\.txt", f.name) or skipped_path(rel):
+            continue
+        for i, raw in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            line = raw.split("#")[0].strip()
+            if not line or line.startswith("-"):
+                continue
+            exact = re.search(r"===?\s*[^\s*,;]+(\s*;.*)?$", line) and "*" not in line
+            if exact or " @ " in line:
+                continue
+            problems.append(Problem("Gov §5", f"`{line}` is not pinned to an exact version (`==`); the scanner skips "
+                                              "unpinned requirements", rel, i, level=level))
     return problems
 
 
@@ -455,8 +490,10 @@ def check_pinned_sources(root: Path) -> list[Problem]:
         if not any(r.get("url") for r in refs):
             missing.append("the URL it is fetched from (externalReferences[].url)")
         hashes = (c.get("hashes") or []) + [h for r in refs for h in (r.get("hashes") or [])]
-        if not hashes and not re.fullmatch(r"[0-9a-f]{40}", str(c.get("version", ""))):
-            missing.append("a pinned hash (hashes) or a full commit as version")
+        strong = [x for x in hashes if str(x.get("alg", "")).upper() in STRONG_HASHES
+                  and re.fullmatch(r"[0-9a-fA-F]{64,128}", str(x.get("content", "")))]
+        if not strong and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(c.get("version", ""))):
+            missing.append("a pinned SHA-256 or stronger hash (hashes) or a full commit as version")
         if not c.get("licenses"):
             missing.append("licenses")
         if missing:
@@ -466,8 +503,14 @@ def check_pinned_sources(root: Path) -> list[Problem]:
     return problems
 
 
-CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".ts", ".py", ".nim", ".go", ".rs", ".kt", ".java", ".rb",
-                  ".php", ".json", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
+STRONG_HASHES = {"SHA-256", "SHA-384", "SHA-512", "SHA3-256", "SHA3-384", "SHA3-512", "BLAKE2B-256", "BLAKE2B-384",
+                 "BLAKE2B-512", "BLAKE3"}
+
+CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".py", ".nim", ".go",
+                  ".rs", ".kt", ".java", ".swift", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".dart", ".rb", ".php",
+                  ".json", ".json5", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
+CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
+COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
 CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}
 
 
@@ -478,28 +521,80 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
         return []
     found = False
     problems = []
+    tm = root / "docs" / "threat-model.md"
+    if tm.is_file() and re.search(r"(?im)^\s*[-*]?\s*CSP:\s*set by\s+\S", tm.read_text(encoding="utf-8", errors="replace")):
+        found = True  # set outside the repository; the review and the audit check it where the threat model says
     for f in tracked_files(root):
         if f.suffix.lower() not in CSP_SOURCE_EXT and f.name not in CSP_SOURCE_NAMES:
             continue
         rel = str(f.relative_to(root))
-        if rel.startswith(("fixtures/", "test/", "tests/")) or "/test/" in rel or "/tests/" in rel:
+        if skipped_path(rel):
             continue
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if "content-security-policy" not in text.lower() and "script-src" not in text:
+        if not CSP_MARKER.search(text):
             continue
         found = True
+        has_script_src = re.search(r"(?i)script-src|scriptSrc", text) is not None
         for i, line in enumerate(text.splitlines(), 1):
-            for directive in re.findall(r"(?i)\b(?:script-src(?:-elem|-attr)?|default-src)\b[^;\"'`]*(?:'[^']*'[^;\"`]*)*", line):
-                bad = [k for k in ("'unsafe-inline'", "'unsafe-eval'") if k in directive.lower()]
-                if bad and (directive.lower().startswith("script-src") or "script-src" not in line.lower()):
+            if COMMENT_LINE.match(line):
+                continue
+            for name, rest in re.findall(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b"
+                                         r"([^;]*)", line):
+                bad = [k for k in ("'unsafe-inline'", "'unsafe-eval'") if k in rest.lower()]
+                if bad and (not name.lower().startswith("default") or not has_script_src):
                     problems.append(Problem("WEB-7", f"a script directive allows {' and '.join(bad)}", rel, i))
     if not found and h.tier_num >= 2:
-        problems.append(Problem("WEB-8", "no Content-Security-Policy found anywhere in the repository (a meta tag, "
-                                         "server code or hosting config). If it is set outside the repository, say where "
-                                         "in docs/threat-model.md; the review checks it there"))
+        problems.append(Problem("WEB-8", "no Content-Security-Policy found in the repository (a meta tag, server code or "
+                                         "hosting config). If it is set outside the repository, add a line "
+                                         "`CSP: set by <where>` to docs/threat-model.md"))
+    return problems
+
+
+def check_baseline_change(root: Path, base: str | None, h: Header) -> list[Problem]:
+    """Section 1: the baseline date is set once, by the adoption PR, and never moved later."""
+    if not base or not h.baseline:
+        return []
+    old = subprocess.run(["git", "-C", str(root), "show", f"{base}:./README.md"], capture_output=True, text=True)
+    if old.returncode != 0:
+        return []
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "README.md").write_text(old.stdout, encoding="utf-8")
+        before = read_header(Path(d))
+    if before.baseline is None and before.policy:
+        return [Problem("Gov §1", "this PR adds a `Baseline:` line to a project that already follows the policy; the "
+                                  "baseline period is only for the adoption PR", "README.md")]
+    old_date = re.search(r"\d{4}-\d{2}-\d{2}", before.baseline or "")
+    new_date = re.search(r"\d{4}-\d{2}-\d{2}", h.baseline)
+    if old_date and new_date and new_date.group(0) > old_date.group(0):
+        return [Problem("Gov §1", f"this PR moves the baseline date from {old_date.group(0)} to {new_date.group(0)}; "
+                                  "the date is never moved later", "README.md")]
+    return []
+
+
+MARKER_RE = re.compile(r"nosemgrep|gitleaks:allow")
+MARKER_OK = re.compile(r"policy-fp:\s*\S.*\(\s*https?://\S+\s*\)|exception\b.*https?://\S+", re.I)
+
+
+def check_markers(root: Path) -> list[Problem]:
+    """Section 5: every suppression marker carries either a `policy-fp: <reason> (<link>)` or a link to its exception."""
+    problems = []
+    for f in tracked_files(root):
+        rel = str(f.relative_to(root))
+        if skipped_path(rel) or f.suffix.lower() in (".md", ".lock") or f.stat().st_size > 2_000_000:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not MARKER_RE.search(text):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if MARKER_RE.search(line) and not MARKER_OK.search(line):
+                problems.append(Problem("Gov §5", "a suppression without `policy-fp: <reason> (<link to the review that "
+                                                  "confirmed it>)` or a link to its Section 10 exception", rel, i))
     return problems
 
 
@@ -531,6 +626,7 @@ def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
         return problems
     in_baseline, baseline_problems = baseline_state(h)
     problems += baseline_problems
+    problems += check_baseline_change(root, base, h)
     problems += check_files(root, h)
     problems += check_budgets(root, h)
     problems += check_budget_loosening(root, base, event)
@@ -538,6 +634,7 @@ def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
     problems += check_lockfiles(root, h)
     problems += check_pinned_sources(root)
     problems += check_csp(root, h)
+    problems += check_markers(root)
     if os.environ.get("POLICY_SKIP_BROWSERSLIST") != "1":
         problems += check_browserslist(root, h)
     if in_baseline:
@@ -599,23 +696,76 @@ def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Pro
     """Section 5 secrets scan: a project's .gitleaks.toml must extend the default rules, and a PR that changes it says
     why (the scan reads the config from the PR itself)."""
     path = root / ".gitleaks.toml"
-    if not path.is_file():
-        return []
-    text = path.read_text(encoding="utf-8", errors="replace")
     problems = []
-    extend = re.search(r"(?ms)^\s*\[extend\]\s*$(.*?)(?=^\s*\[|\Z)", text)
-    if not extend or not re.search(r"(?m)^\s*useDefault\s*=\s*true\b", extend.group(1)):
-        problems.append(Problem("Gov §5", "`.gitleaks.toml` does not extend the default rules, so it switches every one "
-                                          "of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml"))
+    if path.is_file():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            import tomllib
+            use_default = (tomllib.loads(text).get("extend") or {}).get("useDefault") is True
+        except ImportError:
+            extend = re.search(r"(?ms)^\s*\[extend\][^\n]*$(.*?)(?=^\s*\[|\Z)", text)
+            use_default = bool(extend and re.search(r"(?m)^\s*useDefault\s*=\s*true\b", extend.group(1))) or \
+                bool(re.search(r"(?m)^\s*extend\.useDefault\s*=\s*true\b", text))
+        except Exception as e:  # tomllib.TOMLDecodeError
+            return [Problem("Gov §5", f"`.gitleaks.toml` is not valid TOML: {e}", ".gitleaks.toml")]
+        if not use_default:
+            problems.append(Problem("Gov §5", "`.gitleaks.toml` does not extend the default rules, so it switches every "
+                                              "one of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml"))
     if base:
-        old = subprocess.run(["git", "-C", str(root), "show", f"{base}:./.gitleaks.toml"], capture_output=True, text=True)
-        changed = old.returncode != 0 or old.stdout != text
+        changed = subprocess.run(["git", "-C", str(root), "diff", "--name-only", f"{base}...HEAD", "--",
+                                  ".gitleaks.toml", ".gitleaksignore"], capture_output=True, text=True).stdout.split()
+        added = subprocess.run(["git", "-C", str(root), "diff", "-U0", f"{base}...HEAD"], capture_output=True,
+                               text=True).stdout
+        allows = [l for l in added.splitlines() if l.startswith("+") and "gitleaks:allow" in l]
         body = ((event.get("pull_request") or {}).get("body") or "")
-        if changed and not re.search(r"(?im)^\s*Secrets config change:\s*\S", body):
-            problems.append(Problem("Gov §5", "this PR changes `.gitleaks.toml`, which the secrets scan of this same PR "
-                                              "uses. Add a `Secrets config change: <reason>` line to the PR description",
-                                    ".gitleaks.toml"))
+        if (changed or allows) and not re.search(r"(?im)^\s*Secrets config change:\s*\S", body):
+            what = ", ".join([f"`{c}`" for c in changed] + (["`gitleaks:allow` comments"] if allows else []))
+            problems.append(Problem("Gov §5", f"this PR changes what the secrets scan ignores ({what}), and that scan "
+                                              "runs on this same PR. Add a `Secrets config change: <reason>` line to "
+                                              "the PR description", changed[0] if changed else None))
     return problems
+
+
+# Semgrep's built-in ignore list, used when a project has no .semgrepignore of its own.
+SEMGREP_DEFAULT_IGNORES = ["node_modules/", "build/", "dist/", "vendor/", ".env/", ".venv/", ".tox/", ".npm/",
+                           "test/", "tests/", "*_test.go", "*.min.js", ".semgrep", ".semgrep_logs/"]
+
+
+def semgrep_ignored(root: Path):
+    """A matcher for the project's .semgrepignore (gitignore syntax, simplified), so that inline-script copies are
+    skipped exactly where Semgrep would skip the HTML file itself."""
+    path = root / ".semgrepignore"
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.is_file() else SEMGREP_DEFAULT_IGNORES
+    patterns = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(":include"):
+            continue
+        negate = line.startswith("!")
+        patterns.append((negate, line.lstrip("!")))
+
+    def ignored(rel: str) -> bool:
+        result = False
+        parts = rel.split("/")
+        for negate, pat in patterns:
+            anchored = pat.startswith("/")
+            pat = pat.strip("/") if pat.endswith("/") else pat.lstrip("/")
+            dir_only = pat != pat.rstrip("/") or raw_dir(pat, lines)
+            if anchored:
+                hit = fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, pat + "/*") or rel.startswith(pat + "/")
+            else:
+                hit = any(fnmatch.fnmatch(p, pat) for p in parts[:-1]) or (not dir_only and fnmatch.fnmatch(parts[-1], pat)) \
+                    or fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, pat + "/*")
+            if hit:
+                result = not negate
+        return result
+    return ignored
+
+
+def raw_dir(pat: str, lines: list[str]) -> bool:
+    return any(l.strip().lstrip("!").lstrip("/") == pat + "/" for l in lines)
 
 
 SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
@@ -627,17 +777,18 @@ def extract_inline(root: Path, out: Path) -> dict[str, str]:
     them blanked and newlines kept, so that a finding's line number is the line in the HTML file. Returns
     {copy path: original relative path}."""
     mapping = {}
+    ignored = semgrep_ignored(root)
     for f in tracked_files(root):
-        if f.suffix.lower() not in (".html", ".htm"):
+        if f.suffix.lower() not in (".html", ".htm") or ignored(str(f.relative_to(root))):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         keep = [False] * len(text)
         any_block = False
         for m in SCRIPT_RE.finditer(text):
             attrs = m.group(1)
-            if re.search(r"(?i)\bsrc\s*=", attrs):
+            if re.search(r"(?i)(?<![\w-])src\s*=", attrs):
                 continue
-            t = re.search(r"(?i)\btype\s*=\s*[\"']?([^\"'\s>]+)", attrs)
+            t = re.search(r"(?i)(?<![\w-])type\s*=\s*[\"']?([^\"'\s>]+)", attrs)
             if (t.group(1).lower() if t else "") not in JS_TYPES:
                 continue
             any_block = True
@@ -662,6 +813,7 @@ def sast_gate(reports: list[Path], mapping: dict[str, str] | None = None) -> lis
     problems, seen = [], set()
     for path in reports:
         if not path.is_file():
+            problems.append(Problem("Gov §5", f"the Semgrep report {path} is missing, so nothing was checked"))
             continue
         for r in json.loads(path.read_text(encoding="utf-8")).get("results", []):
             extra = r.get("extra", {})
@@ -675,13 +827,14 @@ def sast_gate(reports: list[Path], mapping: dict[str, str] | None = None) -> lis
                 continue
             seen.add(key)
             severity = str(extra.get("severity", "")).upper()
+            blocking_severity = severity in ("ERROR", "HIGH", "CRITICAL")
             confidence = str(meta.get("confidence", "")).upper()
             subcategory = [str(x).lower() for x in (meta.get("subcategory") or [])]
             policy_rule = meta.get("policy-rule")
             if policy_rule:
-                level = "error" if severity == "ERROR" else "warning"
+                level = "error" if blocking_severity else "warning"
             else:
-                level = "error" if severity == "ERROR" and confidence != "LOW" and "audit" not in subcategory else "warning"
+                level = "error" if blocking_severity and confidence != "LOW" and "audit" not in subcategory else "warning"
             message = " ".join(str(extra.get("message", "")).split())
             if policy_rule and message.startswith(f"{policy_rule}:"):
                 message = message[len(policy_rule) + 1:].strip()
@@ -740,8 +893,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "header":
         h = read_header(root)
-        print(json.dumps({"tier": h.tier, "policy": h.policy, "types": h.types,
-                          "users": h.users, "lighter_t2": h.lighter_t2}))
+        print(json.dumps({"tier": h.tier, "policy": h.policy, "types": h.types, "users": h.users,
+                          "lighter_t2": h.lighter_t2, "baseline": baseline_state(h)[0]}))
         return 0
 
     event = {}

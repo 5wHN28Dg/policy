@@ -50,7 +50,7 @@ runs:
         if [[ $WEB == true ]]; then
           # Inline <script> blocks: Semgrep doesn't parse JavaScript inside HTML, so scan extracted copies.
           python3 "$tools/policy_check.py" extract-inline --root . --out "$out/inline"
-          mapfile -t copies < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' "$out/inline/inline-map.json")
+          mapfile -t copies < <(python3 -c 'import json,sys; sys.stdout.write("".join(p + "\n" for p in json.load(open(sys.argv[1]))))' "$out/inline/inline-map.json")
           if [[ ${#copies[@]} -gt 0 ]]; then
             semgrep scan --metrics off --json --output "$out/inline.json" --config "$rules" "${copies[@]}" || [[ $? -eq 1 ]]
             reports+=(--report "$out/inline.json")
