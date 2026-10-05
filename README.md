@@ -26,12 +26,48 @@ Tiers: T0 projects follow only the governance rules for T0 (a secrets scan); the
 
 ## Adopting the policy in a project
 
-1. Do the adoption checklist in [governance/review-audit.md Section 1](governance/review-audit.md#1-purpose-and-scope): state the tier and the policy version (`Policy: vX.Y`) in the README, add `SECURITY.md`, the CI checks, branch protection, and the threat model and findings register where the tier needs them.
+1. Do the adoption checklist in [governance/review-audit.md Section 1](governance/review-audit.md#1-purpose-and-scope): state the tier and the policy version in the README, add `SECURITY.md`, the CI checks, branch protection, and the threat model and findings register where the tier needs them. Write the README statement as these lines, so that the conformance check can read them:
+
+   ```
+   Tier: T2
+   Policy: v1.1
+   Type: web, native
+   Users: none
+   ```
+
+   `Type:` lists every project type from the table above that applies (`web`, `native`, `service`, `firmware`, `webview`, `engine-bundling`). `Users: none` is optional: it marks a solo T2 project with no external users yet, which gets the [Section 11](governance/review-audit.md#11-solo-developer-adaptations) lighter-T2 relief. Remove it at the first release others install or depend on, or when the project adds a network-facing service, whichever comes first.
 2. Find the project's type in the table above. Its standard says what else the README must declare: target browsers (`browserslist`), OS versions, or the runtime.
 3. Write `docs/capability-matrix.md` from [the template](templates/capability-matrix.md), before choosing the stack in a new project.
 4. From T2: add `budgets.json` (validate it against [the schema](templates/budgets.schema.json); start from [the example](templates/budgets.example.json) but set your own numbers) and the CI jobs that read it.
 5. From T2: write a [dependency record](templates/dependency-record.md) for each direct dependency, as [`DEP-2`](standards/dependencies.md#dep-2) requires, including the ones the project already has.
 6. Existing project: run the baseline audit ([Section 7](governance/review-audit.md#7-release-audit)) against the governance document and the applicable standards.
+
+## Automation
+
+The policy ships the CI that checks it. A project copies [templates/ci/policy.yml](templates/ci/policy.yml) into `.github/workflows/`, replaces `POLICY_SHA` with the commit of the policy version it follows, and makes the jobs required for merge. Each job is a composite action in [`actions/`](actions/), pinned by SHA (`DEP-7`), with its tools pinned and checksum-verified:
+
+| Action | What it checks | Blocks |
+| --- | --- | --- |
+| [conformance](actions/conformance/action.yml) | README header; required files per tier; `budgets.json` against the schema; loosened budgets without a `Budget change:` line in the PR; `DEP-7` pins; the `WEB-1` resolved browser list | Yes |
+| [secrets](actions/secrets/action.yml) | Section 5 secrets in code and history (gitleaks) | Yes, every tier |
+| [vulns](actions/vulns/action.yml) | Section 5 known-vulnerable dependencies and licenses (osv-scanner, against `license-allowlist.txt`) | Every severity on T3; High and Critical on T2; warnings on T1 |
+| [sast](actions/sast/action.yml) | `WEB-9` and `WEB-10` sink rules ([semgrep/](semgrep/)) for HTML UIs from T1; Semgrep's default ruleset from full T2 | Yes |
+| [sbom](actions/sbom/action.yml) | Section 5 SBOM (Syft, CycloneDX) on release tags | No; uploads an artifact |
+| [claude-review](actions/claude-review/action.yml) | A fresh-context Claude review of each PR against Section 6 and the standards, with inline comments and one summary comment | No; advisory |
+
+Everything else a rule's Check names (records, matrices, manual checks, threat-model content) is for the PR review and the release audit.
+
+Known limit: Semgrep's `p/default` ruleset, used from full T2, is fetched from the Semgrep registry at run time and is not versioned, so a registry update can fail a build with no change in the project. Treat such a failure as a new finding, not a broken build.
+
+**PR review (Claude, in CI).** Needs a repository secret `CLAUDE_CODE_OAUTH_TOKEN`: run `claude setup-token` (Claude Pro or Max), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN` in the project. It runs only for PRs from the project's own branches, never from forks. The review is a blind pass (Section 11): `CLAUDE.md`, `CLAUDE.local.md`, `.claude/` and `docs/decisions/` (change the list with the `hide` input) are deleted from its checkout and denied to Claude's file tools, and in-repo Claude settings are not loaded. Claude can read the checkout, the policy and the PR's diff, post inline comments, and nothing else: no shell, no writes, no web. Treat everything in a PR as untrusted, including its description; the summary is scrubbed of anything token-shaped before it is posted. Its output is leads, not findings.
+
+**Release audit (Claude, on your machine).** Run [tools/audit.sh](tools/audit.sh) from a clone of this repo:
+
+```
+tools/audit.sh --scope "the sync protocol" ~/code/my-project
+```
+
+It audits a copy of the project's last commit, without its git history (commit messages are rationale too), in one new Claude Code session with your customizations off. Pass 1 is blind: the rationale paths (default `CLAUDE.md .claude docs/decisions`, change them with `--rationale`) are removed. Only committed files are audited, so gitignored notes such as `CLAUDE.local.md` are never shown to the auditor. Pass 2 resumes the same session with the rationale added and attacks it. Claude can only read, search and list files. Check out the policy version the project declares first; the script warns if they differ. The reports land next to the project in `<name>-audit-<date>/`. Confirm each finding before recording it, and keep the final report with the release (Section 7).
 
 ## Changing the policy
 

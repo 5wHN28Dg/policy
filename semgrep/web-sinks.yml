@@ -1,0 +1,105 @@
+# WEB-9 and WEB-10: HTML sinks, framework escape hatches and script URLs.
+# A finding is a review blocker unless the value comes from the sanitizer (WEB-9) or the URL validation helper
+# (WEB-10). Mark a reviewed site with `// nosemgrep: <rule-id> -- <reason>, exception <link>` (Section 5).
+rules:
+  - id: web-9-html-sink-assignment
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      WEB-9: HTML sink. Use textContent, or pass the value through the project's sanitizer first.
+    metadata: { policy-rule: WEB-9 }
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $V
+          - pattern: $EL.outerHTML = $V
+          - pattern: $EL.srcdoc = $V
+          - pattern: $EL.insertAdjacentHTML($POS, $V)
+          - pattern: document.write(...)
+          - pattern: document.writeln(...)
+          - pattern: $R.createContextualFragment($V)
+          - pattern: $EL.setAttribute("srcdoc", $V)
+      - pattern-not: $EL.$PROP = "..."
+      - pattern-not: $EL.insertAdjacentHTML($POS, "...")
+      - pattern-not: $EL.setAttribute($A, "...")
+      - pattern-not: $EL.setAttribute($A, $SAN.sanitize(...))
+      - pattern-not: $EL.$PROP = $SAN.sanitize(...)
+      - pattern-not: $EL.insertAdjacentHTML($POS, $SAN.sanitize(...))
+
+  - id: web-9-react-dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      WEB-9: dangerouslySetInnerHTML. Its __html value must come from the project's sanitizer.
+    metadata: { policy-rule: WEB-9 }
+    patterns:
+      - pattern: '<$TAG dangerouslySetInnerHTML={$V} />'
+      - pattern-not: '<$TAG dangerouslySetInnerHTML={{__html: $SAN.sanitize(...)}} />'
+
+  - id: web-9-template-escape-hatch
+    languages: [generic]
+    paths:
+      include: ["*.vue", "*.svelte", "*.html", "*.htm"]
+    severity: ERROR
+    message: >-
+      WEB-9: template escape hatch (v-html, {@html}). The value must come from the project's sanitizer.
+    metadata: { policy-rule: WEB-9 }
+    pattern-either:
+      - pattern-regex: \bv-html\s*=
+      - pattern-regex: \{@html\s
+
+  - id: web-9-angular-bypass-security
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      WEB-9: Angular bypassSecurityTrust*. Only allowed for sanitized values, with a Section 10 exception.
+    metadata: { policy-rule: WEB-9 }
+    pattern-regex: \.bypassSecurityTrust(Html|Script|Style|Url|ResourceUrl)\s*\(
+
+  - id: web-10-dynamic-url-sink
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      WEB-10: a URL built at run time is used as a link, script, form or navigation target. Route it through the
+      project's URL validation helper, which allows only http, https and mailto.
+    metadata: { policy-rule: WEB-10 }
+    patterns:
+      - pattern-either:
+          - pattern: $EL.href = $V
+          - pattern: $EL.src = $V
+          - pattern: $EL.action = $V
+          - pattern: $EL.formAction = $V
+          - pattern: location.href = $V
+          - pattern: window.location.href = $V
+          - pattern: document.location.href = $V
+          - pattern: location = $V
+          - pattern: window.location = $V
+          - pattern: document.location = $V
+          - pattern: location.assign($V)
+          - pattern: location.replace($V)
+          - pattern: window.location.assign($V)
+          - pattern: window.location.replace($V)
+          - pattern: document.location.assign($V)
+          - pattern: document.location.replace($V)
+          - pattern: window.open($V, ...)
+          - pattern: $EL.setAttribute("href", $V)
+          - pattern: $EL.setAttribute("src", $V)
+          - pattern: $EL.setAttribute("action", $V)
+          - pattern: $EL.setAttribute("formaction", $V)
+      - pattern-not: $X = "..."
+      - pattern-not: window.open("...", ...)
+      - pattern-not: $LOC.assign("...")
+      - pattern-not: $LOC.replace("...")
+      - pattern-not: $EL.setAttribute($A, "...")
+      - pattern-not: $EL.$P = $U.safeUrl(...)
+      - pattern-not: $L.$M($U.safeUrl(...), ...)
+      - pattern-not: $EL.setAttribute($A, $U.safeUrl(...))
+
+  - id: web-10-javascript-url-literal
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      WEB-10: a javascript: URL. Use an event listener instead.
+    metadata: { policy-rule: WEB-10 }
+    paths:
+      exclude: ["*.test.*", "*.spec.*", "**/test/**", "**/tests/**", "**/__tests__/**"]
+    pattern-regex: '(?i)["`'']\s*javascript:'

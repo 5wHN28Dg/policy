@@ -1,0 +1,144 @@
+name: Policy PR review (Claude)
+description: >-
+  Fresh-context AI review of a pull request against the policy (governance Section 6 and the applicable standards),
+  the solo substitute for an independent reviewer in Section 11. Posts inline comments and one summary comment.
+  Advisory: it never fails the check. Needs actions/checkout with fetch-depth 0 and persist-credentials false, and
+  permissions contents: read, pull-requests: write.
+inputs:
+  claude-code-oauth-token:
+    description: Token from `claude setup-token` (Claude Pro or Max), stored as a repository secret.
+    required: true
+  github-token:
+    description: Token for posting comments.
+    default: ${{ github.token }}
+  model:
+    description: Claude model to use (empty for the default).
+    default: ''
+  hide:
+    description: >-
+      Space-separated paths, relative to the repository root, that the reviewer must not see, so that the review is
+      a blind pass (Section 11). They are deleted from the checkout and denied to Claude's file tools.
+    default: CLAUDE.md CLAUDE.local.md .claude docs/decisions
+outputs:
+  summary-file:
+    description: Path of the review summary that was posted.
+    value: ${{ steps.post.outputs.summary-file }}
+runs:
+  using: composite
+  steps:
+    - id: prep
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        HIDE: ${{ inputs.hide }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REPOSITORY: ${{ github.repository }}
+        POLICY_DIR: ${{ github.action_path }}/../..
+      run: |
+        if [[ -z $PR_NUMBER ]]; then echo "::error::claude-review runs on pull_request events only"; exit 1; fi
+        workspace=$(pwd -P)
+        deny=()
+        excludes=()
+        for p in $HIDE; do
+          # Resolve only the parent: if a PR turns a hidden path into a symlink, delete the link, not its target.
+          parent=$(realpath -m -- "$workspace/$(dirname -- "$p")")
+          if [[ $parent != "$workspace" && $parent != "$workspace"/* ]]; then
+            echo "::error::hide path '$p' is outside the repository"; exit 1
+          fi
+          rm -rf -- "$parent/$(basename -- "$p")"
+          deny+=("Read(./$p)" "Read(./$p/**)")
+          excludes+=(":(exclude)$p" ":(exclude)$p/**")
+        done
+        deny+=("Read(./.git/**)" "Read(./.claude-pr/**)")
+        review_dir="$RUNNER_TEMP/policy-review"
+        rm -rf "$review_dir" && mkdir -p "$review_dir"
+        git fetch --quiet --no-tags origin "$BASE_SHA" 2>/dev/null || true
+        # The diff leaves out the hidden paths too, or a PR that edits them would hand the rationale to the reviewer.
+        git diff --no-ext-diff "$BASE_SHA...$HEAD_SHA" -- . "${excludes[@]}" > "$review_dir/pr.diff"
+        printf '# %s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$review_dir/pr.md"
+        policy_dir=$(cd "$POLICY_DIR" && pwd -P)
+        export POLICY_DIR=$policy_dir REVIEW_DIR=$review_dir
+        python3 -c '
+        import os, sys
+        text = open(os.path.join(os.environ["POLICY_DIR"], "prompts", "pr-review.md"), encoding="utf-8").read()
+        values = {"POLICY_DIR": os.environ["POLICY_DIR"], "PR_NUMBER": os.environ["PR_NUMBER"],
+                  "REPOSITORY": os.environ["REPOSITORY"], "PR_FILE": os.environ["REVIEW_DIR"] + "/pr.md",
+                  "DIFF_FILE": os.environ["REVIEW_DIR"] + "/pr.diff"}
+        for k, v in values.items():
+            text = text.replace("{{" + k + "}}", v)
+        sys.stdout.write(text)' > "$review_dir/prompt.md"
+        allowed="Read(./**),Read(/$policy_dir/**),Read(/$review_dir/**),Glob,Grep,mcp__github_inline_comment__create_inline_comment"
+        denied="$(IFS=,; echo "${deny[*]}"),Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
+        {
+          echo "policy-dir=$policy_dir"
+          echo "review-dir=$review_dir"
+          echo "allowed=$allowed"
+          echo "denied=$denied"
+        } >> "$GITHUB_OUTPUT"
+        delim="POLICY_PROMPT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+        { echo "prompt<<$delim"; cat "$review_dir/prompt.md"; echo; echo "$delim"; } >> "$GITHUB_OUTPUT"
+    - id: claude
+      uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+      continue-on-error: true
+      with:
+        claude_code_oauth_token: ${{ inputs.claude-code-oauth-token }}
+        github_token: ${{ inputs.github-token }}
+        prompt: ${{ steps.prep.outputs.prompt }}
+        classify_inline_comments: false
+        claude_args: >-
+          --setting-sources user
+          ${{ inputs.model && format('--model {0}', inputs.model) || '' }}
+          --add-dir ${{ steps.prep.outputs.policy-dir }} ${{ steps.prep.outputs.review-dir }}
+          --allowedTools "${{ steps.prep.outputs.allowed }}"
+          --disallowedTools "${{ steps.prep.outputs.denied }}"
+    - id: post
+      shell: bash
+      if: always() && steps.prep.outcome == 'success'
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        REVIEW_DIR: ${{ steps.prep.outputs.review-dir }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        summary="$REVIEW_DIR/summary.md"
+        python3 - "$summary" <<'PY'
+        import json, os, re, sys
+        out = sys.argv[1]
+        text = ""
+        path = os.environ.get("EXECUTION_FILE") or ""
+        if path and os.path.isfile(path):
+            try:
+                messages = json.load(open(path, encoding="utf-8"))
+                results = [m for m in messages if isinstance(m, dict) and m.get("type") == "result"]
+                text = (results[-1].get("result") or "") if results else ""
+            except (ValueError, OSError):
+                text = ""
+        if not text.strip():
+            text = "## Policy review: not completed\n\nThe Claude review step produced no summary. See the workflow log."
+        # Never post anything that looks like a credential, whatever the reviewer was talked into writing.
+        token = os.environ.get("GH_TOKEN", "")
+        if token:
+            text = text.replace(token, "[REDACTED]")
+        text = re.sub(r"\b(gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{20,})", "[REDACTED]", text)
+        text = re.sub(r"(?i)\b(authorization:\s*(basic|bearer)\s+)\S+", r"\1[REDACTED]", text)
+        open(out, "w", encoding="utf-8").write(text[:60000])
+        PY
+        echo "summary-file=$summary" >> "$GITHUB_OUTPUT"
+        marker='<!-- policy-claude-review -->'
+        body="$marker"$'\n'"$(cat "$summary")"
+        # The default token can't read /user; it posts as github-actions[bot]. A PAT or App token posts as its owner.
+        login=$(gh api user --jq .login 2>/dev/null) || login="github-actions[bot]"
+        [[ $login =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || login="github-actions[bot]"
+        id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+               -q ".[] | select(.user.login == \"$login\" and (.body | startswith(\"$marker\"))) | .id" | tail -1)
+        if [[ -n $id ]]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+        else
+          gh pr comment "$PR_NUMBER" --body "$body"
+        fi
+        cat "$summary" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,49 @@
+name: Policy dependency scan
+description: >-
+  Section 5, known-vulnerable dependencies and license compliance, with osv-scanner. T1: vulnerabilities are
+  warnings. T2: High and Critical block. T3: every known vulnerability blocks. From T2, every package's license
+  must be in license-allowlist.txt.
+inputs:
+  working-directory:
+    description: The project root, relative to the workspace (for monorepos and tests).
+    default: '.'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: >-
+        "${{ github.action_path }}/../../tools/fetch-tool.sh" osv-scanner
+        https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
+        ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+    - shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.working-directory }}
+      run: |
+        set +e
+        osv-scanner scan source -r --allow-no-lockfiles --format json --output-file "$RUNNER_TEMP/osv.json" .
+        code=$?
+        set -e
+        # 0: clean, 1: vulnerabilities found (gated below), 128: nothing to scan
+        if [[ $code -ne 0 && $code -ne 1 && $code -ne 128 ]]; then exit "$code"; fi
+        python3 "${{ github.action_path }}/../../tools/policy_check.py" vulns --root . --report "$RUNNER_TEMP/osv.json"
+    - shell: bash
+      working-directory: ${{ github.workspace }}/${{ inputs.working-directory }}
+      run: |
+        tier=$(python3 "${{ github.action_path }}/../../tools/policy_check.py" tier --root .)
+        lighter=$(python3 "${{ github.action_path }}/../../tools/policy_check.py" header --root . | python3 -c 'import json,sys; print(json.load(sys.stdin)["lighter_t2"])')
+        if [[ $tier != T2 && $tier != T3 ]] || [[ $lighter == True ]]; then
+          echo "License compliance is not required below full T2 (Section 5)."; exit 0
+        fi
+        if [[ ! -f license-allowlist.txt ]]; then
+          echo "::error file=license-allowlist.txt::Gov §5: license-allowlist.txt is missing"; exit 1
+        fi
+        allowed=$(grep -vE '^\s*(#|$)' license-allowlist.txt | tr -d ' ' | paste -sd, -)
+        set +e
+        # osv-scanner exits 1 for vulnerabilities too, so the gate reads the report, not the exit code.
+        osv-scanner scan source -r --allow-no-lockfiles --licenses="$allowed" --format json --output-file "$RUNNER_TEMP/osv-licenses.json" .
+        code=$?
+        set -e
+        if [[ $code -ne 0 && $code -ne 1 && $code -ne 128 ]]; then exit "$code"; fi
+        if [[ $code -ne 128 && ! -s $RUNNER_TEMP/osv-licenses.json ]]; then
+          echo "::error::Gov §5: osv-scanner wrote no license report"; exit 1
+        fi
+        python3 "${{ github.action_path }}/../../tools/policy_check.py" licenses --report "$RUNNER_TEMP/osv-licenses.json"

@@ -4,8 +4,13 @@ Copy to `docs/capability-matrix.md`. Required by `NAT-3`, `WEB-1` and `OTH-2`.
 
 Checked: <date>   Checked by: <name or method>
 Declared targets: <OS versions from the README, or runtime/board versions>
-Resolved browser list (web only): <output of `npx browserslist` on the check date, one browser and version per line; CI compares it with the current output (WEB-1)>
 Sources: <MDN, caniuse, vendor docs, with links; memory is not a source>
+
+Resolved browser list (web only): the output of `npx browserslist` on the check date. CI compares it with the current output in both directions (WEB-1).
+
+```
+<one browser and version per line, e.g. chrome 140>
+```
 
 Write this before choosing the stack or architecture. Rebuild it, with a new date, when a target is added or changed (a browser in the resolved list, an OS, an OS version range, a board, a runtime version), or when a feature needs a capability that is not yet a row.
 
