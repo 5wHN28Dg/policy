@@ -224,6 +224,8 @@ Any departure from this policy is a written, time-limited exception; an unwritte
 
 Not eligible for exception: Critical findings, secrets committed to the repository (rotate them; deleting the commit is not enough), and disabling branch protection.
 
+A project that uses the policy's CI records each exception as an entry in `policy-exceptions.json` at its root ([example](../templates/policy-exceptions.example.json)): the rule ID, the files it covers (required when the rule is a section of this document, which spans several checks), the finding, the reason, the compensating control, who accepted it, the dates it was written, accepted and expires, the renewal count, and a link to its issue. Until the expiry, CI reports a failure the entry covers as a warning that names it; after the expiry, the failure blocks again. A line-level suppression links its entry with `exception: <link>`. CI refuses entries that break this section: an expiry more than 90 days after acceptance, an exception for secrets, or (Section 11) acceptance less than a day after writing. It never applies one to a Critical vulnerability or to the policy's own controls (suppression markers, the secrets-scan configuration, the baseline period).
+
 ## 11. Solo-developer adaptations
 
 A solo developer cannot be independent of their own code, so the policy substitutes weaker forms of independence and is honest that they are weaker. Every other rule still applies, including branch protection and blocking CI.

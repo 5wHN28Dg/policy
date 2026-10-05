@@ -75,6 +75,7 @@ class Problem:
     line: int | None = None
     level: str = "error"     # "error" fails the check; "warning" is reported only
     artifact: bool = False   # a missing artifact, which a Baseline period turns into a warning (Section 1)
+    exceptable: bool = True  # False for what Section 10 rules out: Critical findings, and the policy's own controls
 
 
 def read_header(root: Path) -> Header:
@@ -576,12 +577,12 @@ def check_baseline_change(root: Path, base: str | None, h: Header) -> list[Probl
         before = read_header(Path(d))
     if before.baseline is None and before.policy:
         return [Problem("Gov §1", "this PR adds a `Baseline:` line to a project that already follows the policy; the "
-                                  "baseline period is only for the adoption PR", "README.md")]
+                                  "baseline period is only for the adoption PR", "README.md", exceptable=False)]
     old_date = re.search(r"\d{4}-\d{2}-\d{2}", before.baseline or "")
     new_date = re.search(r"\d{4}-\d{2}-\d{2}", h.baseline)
     if old_date and new_date and new_date.group(0) > old_date.group(0):
         return [Problem("Gov §1", f"this PR moves the baseline date from {old_date.group(0)} to {new_date.group(0)}; "
-                                  "the date is never moved later", "README.md")]
+                                  "the date is never moved later", "README.md", exceptable=False)]
     return []
 
 
@@ -609,7 +610,8 @@ def check_markers(root: Path) -> list[Problem]:
             hit = ALLOW_MARKER in line if markdown else MARKER_RE.search(line)
             if hit and not MARKER_OK.search(line):
                 problems.append(Problem("Gov §5", "a suppression without `policy-fp: <reason> (<link to the review that "
-                                                  "confirmed it>)` or a link to its Section 10 exception", rel, i))
+                                                  "confirmed it>)` or a link to its Section 10 exception", rel, i,
+                                        exceptable=False))
     return problems
 
 
@@ -620,18 +622,18 @@ def baseline_state(h: Header, today: datetime.date | None = None) -> tuple[bool,
     today = today or datetime.date.today()
     m = re.match(r"(?i)^until\s+(\d{4}-\d{2}-\d{2})$", h.baseline.strip())
     if not m:
-        return False, [Problem("Gov §1", f"README `Baseline: {h.baseline}` is not in the form `Baseline: until YYYY-MM-DD`", "README.md")]
+        return False, [Problem("Gov §1", f"README `Baseline: {h.baseline}` is not in the form `Baseline: until YYYY-MM-DD`", "README.md", exceptable=False)]
     try:
         until = datetime.date.fromisoformat(m.group(1))
     except ValueError:
-        return False, [Problem("Gov §1", f"README baseline date `{m.group(1)}` is not a valid date", "README.md")]
+        return False, [Problem("Gov §1", f"README baseline date `{m.group(1)}` is not a valid date", "README.md", exceptable=False)]
     if until < today:
         return False, [Problem("Gov §1", f"the baseline period ended on {until}: complete the baseline audit, remove the "
-                                         "`Baseline:` line, and fix the missing artifacts", "README.md")]
+                                         "`Baseline:` line, and fix the missing artifacts", "README.md", exceptable=False)]
     if (until - today).days > 90:
-        return False, [Problem("Gov §1", f"the baseline date {until} is more than 90 days ahead", "README.md")]
+        return False, [Problem("Gov §1", f"the baseline date {until} is more than 90 days ahead", "README.md", exceptable=False)]
     return True, [Problem("Gov §1", f"baseline period until {until}: missing artifacts are reported as warnings",
-                          "README.md", level="warning")]
+                          "README.md", level="warning", exceptable=False)]
 
 
 def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
@@ -656,7 +658,8 @@ def conformance(root: Path, base: str | None, event: dict) -> list[Problem]:
         for p in problems:
             if p.artifact:
                 p.level = "warning"
-    return problems
+    exceptions, exception_problems = load_exceptions(root)
+    return apply_exceptions(problems, exceptions) + exception_problems
 
 
 def vuln_gate(report_path: Path, tier: str | None) -> tuple[list[Problem], list[Problem]]:
@@ -674,6 +677,7 @@ def vuln_gate(report_path: Path, tier: str | None) -> tuple[list[Problem], list[
                 raw = group.get("max_severity") or ""
                 try:
                     high = float(raw) >= 7.0
+                    critical = float(raw) >= 9.0
                     shown = f"CVSS {raw}"
                 except ValueError:
                     levels = {str((v.get("database_specific") or {}).get("severity", "")).upper()
@@ -681,8 +685,10 @@ def vuln_gate(report_path: Path, tier: str | None) -> tuple[list[Problem], list[
                     levels.discard("")
                     # No CVSS score: use the advisory database's rating; with no rating at all, assume the worst.
                     high = bool(levels & {"HIGH", "CRITICAL"}) or not levels
+                    critical = "CRITICAL" in levels or not levels
                     shown = f"severity {', '.join(sorted(levels)) or 'unknown'}"
-                p = Problem("Gov §5", f"known-vulnerable dependency {info.get('name')} {info.get('version')}: {ids} ({shown})", rel)
+                p = Problem("Gov §5", f"known-vulnerable dependency {info.get('name')} {info.get('version')}: {ids} ({shown})",
+                            rel, exceptable=not critical)
                 # Section 5: High and Critical block from T2; on T3 every known vulnerability blocks.
                 if n >= 3 or (n >= 2 and high):
                     blocking.append(p)
@@ -711,7 +717,7 @@ def base_missing(root: Path, base: str) -> Problem | None:
     """A PR check that can't see its base would pass silently; fail instead."""
     ok = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
                         capture_output=True, text=True).returncode == 0
-    return None if ok else Problem("Gov §5", f"the PR base `{base}` is not available; check out with fetch-depth: 0")
+    return None if ok else Problem("Gov §5", f"the PR base `{base}` is not available; check out with fetch-depth: 0", exceptable=False)
 
 
 def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Problem]:
@@ -729,10 +735,10 @@ def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Pro
             use_default = bool(extend and re.search(r"(?m)^\s*useDefault\s*=\s*true\b", extend.group(1))) or \
                 bool(re.search(r"(?m)^\s*extend\.useDefault\s*=\s*true\b", text))
         except Exception as e:  # tomllib.TOMLDecodeError
-            return [Problem("Gov §5", f"`.gitleaks.toml` is not valid TOML: {e}", ".gitleaks.toml")]
+            return [Problem("Gov §5", f"`.gitleaks.toml` is not valid TOML: {e}", ".gitleaks.toml", exceptable=False)]
         if not use_default:
             problems.append(Problem("Gov §5", "`.gitleaks.toml` does not extend the default rules, so it switches every "
-                                              "one of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml"))
+                                              "one of them off. Add `[extend]` with `useDefault = true`", ".gitleaks.toml", exceptable=False))
     if base and (missing := base_missing(root, base)):
         return problems + [missing]
     if base:
@@ -746,7 +752,7 @@ def check_gitleaks_config(root: Path, base: str | None, event: dict) -> list[Pro
             what = ", ".join([f"`{c}`" for c in changed] + ([f"`{ALLOW_MARKER}` comments"] if allows else []))
             problems.append(Problem("Gov §5", f"this PR changes what the secrets scan ignores ({what}), and that scan "
                                               "runs on this same PR. Add a `Secrets config change: <reason>` line to "
-                                              "the PR description", changed[0] if changed else None))
+                                              "the PR description", changed[0] if changed else None, exceptable=False))
     return problems
 
 
@@ -867,6 +873,106 @@ def sast_gate(reports: list[Path], mapping: dict[str, str] | None = None) -> lis
     return problems
 
 
+EXCEPTIONS_FILE = "policy-exceptions.json"
+NOT_EXCEPTABLE = {"secrets"}  # Section 10: secrets committed to the repository are rotated, never excepted
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass
+class Exception_:
+    id: str
+    rule: str
+    files: list[str]
+    expires: datetime.date
+    accepted: datetime.date
+
+
+def load_exceptions(root: Path, today: datetime.date | None = None) -> tuple[list[Exception_], list[Problem]]:
+    """Section 10, as CI reads it: policy-exceptions.json lists each written, time-limited exception. Returns the
+    exceptions in force today, and the problems with the file itself (invalid or expired entries)."""
+    path = root / EXCEPTIONS_FILE
+    if not path.is_file():
+        return [], []
+    today = today or datetime.date.today()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return [], [Problem("Gov §10", f"not valid JSON: {e.msg}", EXCEPTIONS_FILE, e.lineno, exceptable=False)]
+    if data.get("schemaVersion") != 1 or not isinstance(data.get("exceptions"), list):
+        return [], [Problem("Gov §10", 'needs "schemaVersion": 1 and an "exceptions" list', EXCEPTIONS_FILE, exceptable=False)]
+    active, problems, seen = [], [], set()
+    required = ("id", "rule", "finding", "reason", "compensatingControl", "acceptedBy", "written", "accepted",
+                "expires", "renewals", "link")
+    for i, e in enumerate(data["exceptions"]):
+        label = str(e.get("id") or f"entry {i + 1}")
+        bad = []
+        missing = [k for k in required if e.get(k) in (None, "", [])]
+        if missing:
+            bad.append(f"lacks {', '.join(missing)}")
+        dates = {}
+        for k in ("written", "accepted", "expires"):
+            v = str(e.get(k, ""))
+            if v and DATE_RE.match(v):
+                try:
+                    dates[k] = datetime.date.fromisoformat(v)
+                except ValueError:
+                    bad.append(f"{k} `{v}` is not a valid date")
+            elif v:
+                bad.append(f"{k} `{v}` is not YYYY-MM-DD")
+        if {"written", "accepted"} <= dates.keys() and dates["accepted"] < dates["written"] + datetime.timedelta(days=1):
+            bad.append("is accepted less than a day after it was written (Section 11: wait 24 hours)")
+        if {"accepted", "expires"} <= dates.keys() and (dates["expires"] - dates["accepted"]).days > 90:
+            bad.append("expires more than 90 days after it was accepted")
+        if "accepted" in dates and dates["accepted"] > today:
+            bad.append("is accepted in the future")
+        rule = str(e.get("rule", ""))
+        if rule.lower() in NOT_EXCEPTABLE:
+            bad.append("excepts secrets in the repository, which Section 10 does not allow: rotate them")
+        if label in seen:
+            bad.append("reuses an id")
+        seen.add(label)
+        files = e.get("files") or []
+        if not isinstance(files, list) or not all(isinstance(f, str) and f for f in files):
+            bad.append('"files" must be a list of path globs')
+        elif rule.startswith("Gov") and not files:
+            # A governance section covers several checks (lockfiles, licenses, vulnerabilities, static analysis);
+            # an exception for one must say which files it is about.
+            bad.append(f'excepts {rule} without "files"; name the files it covers')
+        if not isinstance(e.get("renewals"), int) or isinstance(e.get("renewals"), bool) or e.get("renewals", 0) < 0:
+            bad.append('"renewals" must be a whole number')
+        if bad:
+            problems.append(Problem("Gov §10", f"{label} " + "; ".join(bad), EXCEPTIONS_FILE, exceptable=False))
+            continue
+        if dates["expires"] < today:
+            problems.append(Problem("Gov §10", f"{label} ({rule}) expired on {dates['expires']}: fix the finding, or "
+                                               "re-decide and renew it (Section 10)", EXCEPTIONS_FILE, exceptable=False))
+            continue
+        active.append(Exception_(label, rule, files, dates["expires"], dates["accepted"]))
+    return active, problems
+
+
+def rule_matches(problem_rule: str, rule: str) -> bool:
+    """`WEB-15/NAT-7/OTH-5` matches an exception for any of the three; `Gov §5 (eval)` matches `Gov §5`."""
+    names = {r.strip() for r in re.split(r"/", re.sub(r"\s*\(.*\)$", "", problem_rule))}
+    return rule.strip() in names or rule.strip() == problem_rule.strip()
+
+
+def apply_exceptions(problems: list[Problem], exceptions: list[Exception_]) -> list[Problem]:
+    """Turn each error that an exception in force covers into a warning naming the exception."""
+    for p in problems:
+        if p.level != "error" or not p.exceptable:
+            continue
+        for e in exceptions:
+            if not rule_matches(p.rule, e.rule):
+                continue
+            if e.files and not (p.file and any(fnmatch.fnmatch(p.file, g) for g in e.files)):
+                continue
+            p.level = "warning"
+            p.message += f" (excepted by {e.id} until {e.expires})"
+            break
+    return problems
+
+
 def report(problems: list[Problem], level: str | None = None, title: str = "Policy conformance") -> int:
     """Print problems (as GitHub annotations in Actions) and return the number of errors.
 
@@ -933,14 +1039,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "sast":
         mapping = json.loads(args.map.read_text(encoding="utf-8")) if args.map and args.map.is_file() else {}
-        problems = sast_gate(args.report, mapping)
+        problems = apply_exceptions(sast_gate(args.report, mapping), load_exceptions(root)[0])
         errors = report(problems, title="Static analysis")
         print(f"{errors} blocking, {len(problems) - errors} warning")
         return 1 if errors else 0
     if args.command == "pins":
         return 1 if report(check_pins(root), title="DEP-7 pins") else 0
     if args.command == "licenses":
-        return 1 if report(license_gate(args.report[0]), title="Licenses") else 0
+        problems = apply_exceptions(license_gate(args.report[0]), load_exceptions(root)[0])
+        return 1 if report(problems, title="Licenses") else 0
     if args.command == "vulns":
         h = read_header(root)
         blocking, warnings = vuln_gate(args.report[0], "T1" if h.lighter_t2 else h.tier)
@@ -956,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
             warnings.append(Problem("DEP-8", "OSV matches few C and C++ sources; check the advisories of every source in "
                                              "pinned-sources.cdx.json by hand at each release audit",
                                     "pinned-sources.cdx.json", level="warning"))
+        apply_exceptions(blocking, load_exceptions(root)[0])
         errors = report(warnings + blocking, title="Known-vulnerable dependencies")
         print(f"{errors} blocking, {len(warnings)} warning, {scanned} package(s) scanned")
         return 1 if errors else 0

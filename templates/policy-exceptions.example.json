@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "id": "EX-1",
+      "rule": "WEB-8",
+      "finding": "The web client serves no Content-Security-Policy.",
+      "reason": "A strict CSP needs the 70 inline onclick handlers in admin.html and index.html moved to addEventListener first.",
+      "compensatingControl": "Every innerHTML in those files is escaped with K.esc and listed in issue #12; no new inline handler merges.",
+      "acceptedBy": "@owner",
+      "written": "2026-10-06",
+      "accepted": "2026-10-07",
+      "expires": "2027-01-05",
+      "renewals": 0,
+      "link": "https://github.com/owner/project/issues/12"
+    },
+    {
+      "id": "EX-2",
+      "rule": "WEB-9",
+      "files": ["admin.html", "index.html"],
+      "finding": "HTML sinks in the inline scripts insert markup built with the project's own escaping, not a sanitizer.",
+      "reason": "Moving to a maintained sanitizer touches every view; planned in issue #13.",
+      "compensatingControl": "K.esc on every interpolated value; the PR review checks each new sink.",
+      "acceptedBy": "@owner",
+      "written": "2026-10-06",
+      "accepted": "2026-10-07",
+      "expires": "2027-01-05",
+      "renewals": 0,
+      "link": "https://github.com/owner/project/issues/13"
+    }
+  ]
+}

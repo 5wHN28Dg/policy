@@ -746,3 +746,101 @@ class ReReviewTests(unittest.TestCase):
             write(Path(d), "README.md", "Tier: T2\nPolicy: v2.0\nType: native\nBaseline: until 2099-01-01\n")
             self.assertIn("not available", pc.check_gitleaks_config(Path(d), "origin/nope", {})[0].message)
             self.assertIn("not available", pc.check_baseline_change(Path(d), "origin/nope", pc.read_header(Path(d)))[0].message)
+
+
+class ExceptionTests(unittest.TestCase):
+    TODAY = datetime.date.today()
+
+    def entry(self, **kw):
+        d = lambda n: (self.TODAY + datetime.timedelta(days=n)).isoformat()
+        e = {"id": "EX-1", "rule": "WEB-8", "finding": "No CSP yet", "reason": "70 inline handlers to move first",
+             "compensatingControl": "WEB-9 sinks reviewed by hand", "acceptedBy": "@owner", "written": d(-3),
+             "accepted": d(-2), "expires": d(60), "renewals": 0, "link": "https://github.com/o/r/issues/1"}
+        e.update(kw)
+        return e
+
+    def load(self, entries, raw=None):
+        with tempfile.TemporaryDirectory() as d:
+            write(Path(d), "policy-exceptions.json", raw if raw is not None else json.dumps({"schemaVersion": 1, "exceptions": entries}))
+            return pc.load_exceptions(Path(d))
+
+    def test_valid_exception_turns_error_into_warning(self):
+        active, problems = self.load([self.entry()])
+        self.assertEqual((len(active), problems), (1, []))
+        p = [pc.Problem("WEB-8", "no CSP"), pc.Problem("WEB-9", "sink", "a.js", 3)]
+        pc.apply_exceptions(p, active)
+        self.assertEqual([x.level for x in p], ["warning", "error"])
+        self.assertIn("excepted by EX-1 until", p[0].message)
+
+    def test_files_scope(self):
+        active, _ = self.load([self.entry(id="EX-2", rule="WEB-9", files=["admin.html", "src/*.js"])])
+        p = [pc.Problem("WEB-9", "s", "admin.html", 1), pc.Problem("WEB-9", "s", "src/a.js", 2),
+             pc.Problem("WEB-9", "s", "index.html", 3), pc.Problem("WEB-9", "s")]
+        pc.apply_exceptions(p, active)
+        self.assertEqual([x.level for x in p], ["warning", "warning", "error", "error"])
+
+    def test_combined_rule_labels(self):
+        active, _ = self.load([self.entry(rule="NAT-7")])
+        p = [pc.Problem("WEB-15/NAT-7/OTH-5", "budgets.json is missing")]
+        self.assertEqual(pc.apply_exceptions(p, active)[0].level, "warning")
+
+    def test_invalid_entries(self):
+        cases = {
+            "lacks": self.entry(reason=""),
+            "less than a day": self.entry(written=self.TODAY.isoformat(), accepted=self.TODAY.isoformat()),
+            "more than 90 days": self.entry(expires=(self.TODAY + datetime.timedelta(days=120)).isoformat()),
+            "secrets": self.entry(rule="secrets"),
+            "without \"files\"": self.entry(rule="Gov §5"),
+            "whole number": self.entry(renewals="none"),
+            "not YYYY-MM-DD": self.entry(expires="soon"),
+        }
+        for text, e in cases.items():
+            active, problems = self.load([e])
+            self.assertEqual(active, [], text)
+            self.assertIn(text, problems[0].message, text)
+            self.assertFalse(problems[0].exceptable)
+
+    def test_expired_exception_stops_applying(self):
+        past = lambda n: (self.TODAY - datetime.timedelta(days=n)).isoformat()
+        active, problems = self.load([self.entry(written=past(80), accepted=past(70), expires=past(1))])
+        self.assertEqual(active, [])
+        self.assertIn("expired on", problems[0].message)
+
+    def test_bad_file(self):
+        self.assertIn("not valid JSON", self.load(None, raw="{")[1][0].message)
+        self.assertIn("schemaVersion", self.load(None, raw='{"exceptions": []}')[1][0].message)
+
+    def test_policy_controls_and_critical_are_not_exceptable(self):
+        active, _ = self.load([self.entry(id="EX-3", rule="Gov §5", files=["*"]), self.entry(id="EX-4", rule="Gov §1")])
+        crit = pc.Problem("Gov §5", "critical vuln", "package-lock.json", exceptable=False)
+        high = pc.Problem("Gov §5", "high vuln", "package-lock.json")
+        marker = pc.Problem("Gov §5", "bare nosemgrep", "a.js", 1, exceptable=False)
+        pc.apply_exceptions([crit, high, marker], active)
+        self.assertEqual([crit.level, high.level, marker.level], ["error", "warning", "error"])
+
+    def test_conformance_reads_the_file(self):
+        os.environ["POLICY_SKIP_BROWSERSLIST"] = "1"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            compliant_project(root, types="web")
+            (root / "index.html").unlink()  # no CSP: WEB-8
+            self.assertEqual([p.rule for p in pc.conformance(root, None, {}) if p.level == "error"], ["WEB-8"])
+            write(root, "policy-exceptions.json", json.dumps({"schemaVersion": 1, "exceptions": [self.entry()]}))
+            self.assertEqual([p.rule for p in pc.conformance(root, None, {}) if p.level == "error"], [])
+
+    def test_vuln_gate_critical_is_not_exceptable(self):
+        report = {"results": [{"source": {"path": "/x/package-lock.json"}, "packages": [
+            {"package": {"name": "a", "version": "1"}, "groups": [{"ids": ["G-1"], "max_severity": "9.8"}]},
+            {"package": {"name": "b", "version": "1"}, "groups": [{"ids": ["G-2"], "max_severity": "7.5"}]}]}]}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "osv.json"
+            path.write_text(json.dumps(report))
+            blocking, _ = pc.vuln_gate(path, "T2")
+        self.assertEqual([b.exceptable for b in blocking], [False, True])
+
+    def test_the_template_example_is_valid(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(pc.POLICY_ROOT / "templates" / "policy-exceptions.example.json", Path(d) / "policy-exceptions.json")
+            active, problems = pc.load_exceptions(Path(d), today=datetime.date(2026, 10, 10))
+            self.assertEqual(([e.id for e in active], problems), (["EX-1", "EX-2"], []))
