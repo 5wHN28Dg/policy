@@ -342,6 +342,8 @@ def check_browserslist(root: Path, h: Header) -> list[Problem]:
     except (OSError, subprocess.SubprocessError) as e:
         return [Problem("WEB-1", f"could not resolve the browser list with npx browserslist: {e}")]
     resolved = {l.strip() for l in out.splitlines() if l.strip()}
+    if not (root / "docs" / "capability-matrix.md").is_file():
+        return []  # the missing matrix is reported once, as an artifact (check_files)
     recorded = recorded_browsers(root / "docs" / "capability-matrix.md")
     if recorded is None:
         return [Problem("WEB-1", "the capability matrix has no resolved browser list (a fenced block after the "
@@ -518,6 +520,9 @@ CSP_SOURCE_EXT = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
                   ".json", ".json5", ".toml", ".yaml", ".yml", ".conf", ".cfg", ".ini", ".xml"}
 DIRECTIVE_RE = re.compile(r"(?i)\b(script-src(?:-elem|-attr)?|scriptSrc(?:Elem|Attr)?|default-src|defaultSrc)\b")
 NEXT_DIRECTIVE_RE = re.compile(r"\b[a-z]+-src(?:-elem|-attr)?\b|\b[a-z]+Src(?:Elem|Attr)?\b")
+ANY_DIRECTIVE_RE = re.compile(r"(?i)\b(?:[a-z]+-src(?:-elem|-attr)?|[a-z]+Src(?:Elem|Attr)?|base-uri|baseUri|form-action|"
+                              r"formAction|frame-ancestors|frameAncestors|sandbox|upgrade-insecure-requests|"
+                              r"require-trusted-types-for)\b")
 CSP_MARKER = re.compile(r"(?i)content-security-policy|contentSecurityPolicy|[\"']csp[\"']\s*:")
 COMMENT_LINE = re.compile(r"^\s*(//|#|\*|/\*|<!--|--|;)")
 CSP_SOURCE_NAMES = {"_headers", ".htaccess", "nginx.conf", "Caddyfile", "vercel.json", "netlify.toml"}
@@ -545,12 +550,11 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
             continue
         if rel == EXCEPTIONS_FILE or not CSP_MARKER.search(text):
             continue
-        lines = text.splitlines()
-        # A file sets a CSP only if a directive appears near the header name; prose about a missing CSP doesn't count.
-        near = [i for i, l in enumerate(lines) if CSP_MARKER.search(l)]
-        if not any(DIRECTIVE_RE.search("\n".join(lines[max(0, i - 5):i + 6])) for i in near):
-            continue
-        found = True
+        # A file sets a CSP only if, outside comments, it names the header and has a directive somewhere: a CSP built
+        # in code keeps them apart, while prose about a missing CSP (or an exception describing one) has no directive.
+        code = [l for l in text.splitlines() if not COMMENT_LINE.match(l)]
+        if any(CSP_MARKER.search(l) for l in code) and any(ANY_DIRECTIVE_RE.search(l) for l in code):
+            found = True
         has_script_src = re.search(r"(?i)script-src|scriptSrc", text) is not None
         for i, line in enumerate(text.splitlines(), 1):
             if COMMENT_LINE.match(line):
@@ -566,9 +570,11 @@ def check_csp(root: Path, h: Header) -> list[Problem]:
                 if bad and (not name.lower().startswith("default") or not has_script_src):
                     problems.append(Problem("WEB-7", f"a script directive allows {' and '.join(bad)}", rel, i))
     if not found and h.tier_num >= 2:
-        problems.append(Problem("WEB-8", "no Content-Security-Policy found in the repository (a meta tag, server code or "
-                                         "hosting config). If it is set outside the repository, add a line "
-                                         "`CSP: set by <where>` to docs/threat-model.md"))
+        problems.append(Problem("WEB-8", "no Content-Security-Policy found in the repository: no file names the header "
+                                         "and has a directive (a meta tag, server code or hosting config). If it is set "
+                                         "outside the repository, or assembled across files the check can't connect "
+                                         "(a template and its settings), add a line `CSP: set by <where>` to "
+                                         "docs/threat-model.md"))
     return problems
 
 

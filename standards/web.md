@@ -20,7 +20,7 @@ Also applies: [dependencies.md](dependencies.md) for every dependency, including
 *Check:* the file exists with a date and sources. For new projects, it is committed no later than the first framework or bundler dependency. CI resolves the browser list (for example `npx browserslist`) and fails if it differs from the list recorded in the matrix, which catches changes from a `caniuse-lite` update as well as edits to the query. A PR that adds use of a platform capability with no matrix row also updates the matrix.
 
 ### WEB-2
-**Tier T1. MUST.** Supported browsers are declared in `browserslist` (a `.browserslistrc` file or the `browserslist` key in `package.json`). If the project has build tooling (a transpiler, bundler or CSS tooling), it reads that declaration. A project with no build step still declares its browsers this way: the declaration is what `WEB-1`'s resolved list and the tests are measured against.
+**Tier T1. MUST.** Supported browsers are declared in `browserslist` (a `.browserslistrc` file or the `browserslist` key in `package.json`). If the project has build tooling (a transpiler, bundler or CSS tooling), it reads that declaration. A project with no build step still declares its browsers this way: the declaration is what `WEB-1`'s resolved browser list and `WEB-5`'s engine tests are measured against.
 *Check:* the declaration exists; where there is build config, it does not override it with a different target list.
 
 ### WEB-3
